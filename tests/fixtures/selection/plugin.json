@@ -1,0 +1,9 @@
+{
+  "schema": 1,
+  "name": "selection-test-fixture",
+  "intent": "Check the complete agent program against an owner reference",
+  "sources": ["report.bend"],
+  "bindings": [],
+  "laws": ["owner_report"],
+  "entrypoint": "main"
+}

@@ -1,0 +1,16 @@
+__pycache__/
+*.pyc
+/bend-spec/.cache
+/bend-spec/artifacts
+/integrations/pi/node_modules
+/.tmp/
+# Generated test reports.
+/artifacts/review-stack/
+
+# Docs site: dependencies, build output and pages generated from the repository's Markdown.
+/site/node_modules/
+/site/dist/
+/site/.astro/
+/site/src/content/docs/
+/site/public/docs-assets/
+/site/release-dist/

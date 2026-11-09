@@ -1,0 +1,41 @@
+{
+  "schema": 1,
+  "name": "meijer-source-guardrails",
+  "intent": "Owner flow and effect constraints over foundation Bend programs",
+  "sources": [
+    "analysis/summary.bend",
+    "library/types.bend",
+    "library/bytes.bend",
+    "library/limits.bend",
+    "owner/classifications.bend",
+    "owner/policy.bend",
+    "laws/rules.bend",
+    "laws/flow.bend",
+    "laws/budget.bend",
+    "laws/guardrails.bend",
+    "laws/sequence.bend",
+    "laws/outcome.bend",
+    "runtime/values.bend",
+    "runtime/residuals.bend",
+    "runtime/approvals.bend",
+    "runtime/main.bend"
+  ],
+  "bindings": [
+    "owner/classifications.bend",
+    "owner/policy.bend"
+  ],
+  "laws": [
+    "scope_safe",
+    "flow_safe",
+    "data_safe",
+    "tools_safe",
+    "frame_safe",
+    "preconditions_safe",
+    "approval_safe",
+    "budget_safe",
+    "sequence_safe",
+    "outcome_safe"
+  ],
+  "entrypoint": "dispatch",
+  "checker": "analysis/check.mjs"
+}

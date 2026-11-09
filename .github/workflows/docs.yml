@@ -1,0 +1,81 @@
+name: Docs site
+
+# Builds the documentation site on every push and pull request. Publishing a
+# GitHub release deploys the docs of every release to GitHub Pages: the newest at
+# the root and each under /vX.Y.Z/. Deployment also requires the repository
+# variable DOCS_DEPLOY to be "true", because a Pages site is public even for a
+# private repository.
+on:
+  push:
+    branches: [main]
+  pull_request:
+  release:
+    types: [published]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: docs-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955 # v4.3.0
+        with:
+          persist-credentials: false
+      - name: Require the release tag to match VERSION
+        if: github.event_name == 'release'
+        env:
+          TAG: ${{ github.event.release.tag_name }}
+        run: test "$TAG" = "v$(cat VERSION)"
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: 22.23.4
+          cache: npm
+          cache-dependency-path: site/package-lock.json
+      - name: Build
+        working-directory: site
+        env:
+          SITE_REPOSITORY: ${{ github.server_url }}/${{ github.repository }}
+        run: |
+          npm ci --ignore-scripts --no-audit --no-fund
+          npm run build
+
+  deploy:
+    needs: build
+    if: (github.event_name == 'release' || github.event_name == 'workflow_dispatch') && vars.DOCS_DEPLOY == 'true'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    permissions:
+      contents: read
+      pages: write
+      id-token: write
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - uses: actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955 # v4.3.0
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: 22.23.4
+      - id: pages
+        uses: actions/configure-pages@45bfe0192ca1faeb007ade9deae92b16b8254a0d # v6.0.0
+      - name: Build every release
+        env:
+          SITE_REPOSITORY: ${{ github.server_url }}/${{ github.repository }}
+          BASE_PATH: ${{ steps.pages.outputs.base_path }}
+          ORIGIN: ${{ steps.pages.outputs.origin }}
+        run: node site/scripts/build-releases.mjs "${BASE_PATH:-/}" "$ORIGIN"
+      - uses: actions/upload-pages-artifact@fc324d3547104276b827a68afc52ff2a11cc49c9 # v5.0.0
+        with:
+          path: site/release-dist
+      - id: deployment
+        uses: actions/deploy-pages@368f82528645a54fb793d4d04e342629a3f51346 # v5.0.1

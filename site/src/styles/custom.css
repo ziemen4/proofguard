@@ -1,0 +1,11 @@
+/* Blue accent shared with the diagrams in docs/assets/. */
+:root {
+  --sl-color-accent-low: #142a3a;
+  --sl-color-accent: #6a9cc0;
+  --sl-color-accent-high: #d6e6f1;
+}
+:root[data-theme="light"] {
+  --sl-color-accent-low: #dbe8f1;
+  --sl-color-accent: #3b6d91;
+  --sl-color-accent-high: #1d3a50;
+}

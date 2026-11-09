@@ -1,0 +1,41 @@
+---
+// Site title plus the docs version. Release builds list every released version
+// and switch between them; local builds show only the version in VERSION.
+import Default from "@astrojs/starlight/components/SiteTitle.astro";
+
+const current = __DOCS_VERSION__;
+const releases = __DOCS_RELEASES__;
+const root = __DOCS_ROOT__;
+const href = (tag, index) => (index === 0 ? root : `${root}${tag}/`);
+---
+
+<div class="title-row">
+  <Default {...Astro.props}><slot /></Default>
+  {releases.length > 1 ? (
+    <select class="version" aria-label="Documentation version" onchange="location.href = this.value">
+      {releases.map((tag, index) => (
+        <option value={href(tag, index)} selected={tag === current}>
+          {index === 0 ? `${tag} (latest)` : tag}
+        </option>
+      ))}
+    </select>
+  ) : (
+    <span class="version">{current}</span>
+  )}
+</div>
+
+<style>
+  .title-row {
+    display: flex;
+    align-items: center;
+    gap: 0.75rem;
+  }
+  .version {
+    font-size: var(--sl-text-xs);
+    color: var(--sl-color-gray-2);
+    border: 1px solid var(--sl-color-gray-5);
+    border-radius: 0.375rem;
+    padding: 0.125rem 0.4rem;
+    background: transparent;
+  }
+</style>

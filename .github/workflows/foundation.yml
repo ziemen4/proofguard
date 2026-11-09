@@ -1,0 +1,79 @@
+name: ProofGuard Foundation
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: foundation-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  foundation:
+    name: Real Bend and Linux sandbox tests
+    runs-on: ubuntu-24.04
+    timeout-minutes: 80
+    steps:
+      - uses: actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955 # v4.3.0
+        with:
+          persist-credentials: false
+      - name: Install host build and namespace tools
+        run: |
+          mkdir -p .tmp/ci-logs
+          sudo apt-get update 2>&1 | tee .tmp/ci-logs/apt-update.log
+          sudo apt-get install --no-install-recommends -y bubblewrap clang zstd xz-utils curl \
+            2>&1 | tee .tmp/ci-logs/apt-install.log
+          # This disposable VM must permit the actual unprivileged namespace tests.
+          sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0 \
+            2>&1 | tee .tmp/ci-logs/namespaces.log
+      - name: Restore pinned download cache
+        uses: actions/cache@5a3ec84eff668545956fd18022155c47e93e2684 # v4.2.3
+        with:
+          path: .tmp/ci-downloads
+          key: foundation-downloads-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('bend-spec/toolchain.lock.json', 'scripts/ci/provision-toolchain.sh') }}
+      - name: Provision and rebuild real pinned toolchain
+        run: bash scripts/ci/provision-toolchain.sh 2>&1 | tee .tmp/ci-logs/toolchain.log
+      - name: Install pinned Node at the foundation tests' fixed path
+        run: |
+          # Only on this disposable CI VM; codec tests invoke /usr/bin/node.
+          pinned_node="$PWD/.tmp/ci-tools/node-v22.23.4-linux-x64/bin/node"
+          sudo install -m 0755 "$pinned_node" /usr/bin/node
+          cmp "$pinned_node" /usr/bin/node
+          /usr/bin/node --version | tee .tmp/ci-logs/fixed-path-node.log
+          sha256sum "$pinned_node" /usr/bin/node | tee -a .tmp/ci-logs/fixed-path-node.log
+      - name: Test CI gates
+        run: python3 -m unittest discover -s scripts/ci -p 'test_*.py' -v 2>&1 | tee .tmp/ci-logs/ci-tests.log
+      - name: Run foundation and shared suites without skips
+        run: python3 scripts/ci/check-foundation.py 2>&1 | tee .tmp/ci-logs/tests.log
+      - name: Run plugin profiles against the qualified foundation
+        if: hashFiles('plugins/*/tests.json') != ''
+        run: python3 scripts/ci/check-foundation.py --plugins 2>&1 | tee .tmp/ci-logs/plugins.log
+      - name: Install the locked pi runtime
+        if: hashFiles('integrations/pi/package-lock.json') != ''
+        run: npm ci --ignore-scripts --prefix integrations/pi 2>&1 | tee .tmp/ci-logs/pi-install.log
+      - name: Run the pi harness against the qualified foundation
+        if: hashFiles('integrations/pi/package-lock.json') != ''
+        run: python3 integrations/pi/review.py 2>&1 | tee .tmp/ci-logs/pi.log
+      - name: Retain logs and source-bound evidence
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: foundation-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            .tmp/ci-logs/
+            artifacts/review-stack/foundation.json
+            artifacts/review-stack/plugins/
+            artifacts/review-stack/pi.json
+            bend-spec/artifacts/toolchain-build.json
+          include-hidden-files: true
+          if-no-files-found: error
+          retention-days: 14

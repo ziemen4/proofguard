@@ -1,0 +1,9 @@
+{
+  "name": "proofguard-pi-runner",
+  "private": true,
+  "license": "Apache-2.0",
+  "type": "module",
+  "scripts": { "test": "node --test tests/proofguard.test.mjs", "start": "node guest.mjs" },
+  "engines": { "node": ">=22.19.0" },
+  "dependencies": { "@earendil-works/pi-coding-agent": "0.85.1" }
+}

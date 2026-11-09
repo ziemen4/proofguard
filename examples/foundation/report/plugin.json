@@ -1,0 +1,9 @@
+{
+  "schema": 1,
+  "name": "owner-report",
+  "intent": "Publish the owner report",
+  "sources": ["checks.bend"],
+  "bindings": [],
+  "laws": ["owner_report"],
+  "entrypoint": "main"
+}

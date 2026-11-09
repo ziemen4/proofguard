@@ -1,0 +1,15 @@
+{
+  "schema": 1,
+  "name": "source-report",
+  "intent": "Only input zero may influence writes to destination zero",
+  "sources": [
+    "summary.bend",
+    "checks.bend"
+  ],
+  "bindings": [],
+  "laws": [
+    "report_safe"
+  ],
+  "entrypoint": "main",
+  "checker": "check.mjs"
+}
