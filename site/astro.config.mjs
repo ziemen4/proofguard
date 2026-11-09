@@ -1,5 +1,5 @@
 // Docs site configuration. SITE_ORIGIN and SITE_BASE come from GitHub Pages in
-// CI; local builds serve from "/".
+// CI; local builds serve from "/" and use the Pages origin for the sitemap.
 import { readFileSync } from "node:fs";
 import starlight from "@astrojs/starlight";
 import { defineConfig } from "astro/config";
@@ -14,7 +14,7 @@ const releases = (process.env.SITE_RELEASES ?? "").split(",").filter(Boolean);
 const root = process.env.SITE_ROOT ?? process.env.SITE_BASE ?? "/";
 
 export default defineConfig({
-  site: process.env.SITE_ORIGIN || undefined,
+  site: process.env.SITE_ORIGIN || "https://ziemen4.github.io",
   base: process.env.SITE_BASE ?? "/",
   vite: {
     define: {

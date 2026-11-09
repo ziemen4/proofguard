@@ -16,7 +16,8 @@ python3 bend-spec/scripts/setup-toolchain.py --lean-home /path/to/lean-4.34.0-li
 
 Node is taken from `/usr/bin/node` and clang from `/usr/bin/clang`; `--node` and
 `--clang` choose other binaries for the build, but the sandbox, evaluator and tests
-still run `/usr/bin/node`. Setup needs about 1.1 GB of free disk.
+still run `/usr/bin/node`. Setup refuses to start with less than 1,100 MiB free disk, though the build
+itself adds only a few megabytes.
 
 Setup downloads the Bend revision pinned in `toolchain.lock.json`, checks each
 file's SHA-256, builds the BendTT kernel and records the runtime identities. Files

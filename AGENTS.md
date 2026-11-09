@@ -54,7 +54,7 @@ or harness keeps its code, docs and tests in its own directory.
 
 ## Verification
 
-Run `python3 scripts/review-tests.py foundation` with the real provisioned
-toolchain, and `python3 integrations/pi/review.py` for the harness layer. Keep generated run reports and workspace orchestration files local.
+Run the four steps in [README](README.md#tests) in order, with the real provisioned
+toolchain: foundation, Meijer, the pi `npm ci`, then `integrations/pi/review.py`.
 The tests exercise runtime behavior and actual Linux namespaces. Toolchain
 refinement, kernel exploits and VM escapes remain outside their coverage.

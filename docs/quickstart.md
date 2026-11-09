@@ -7,15 +7,17 @@ and reading the result. No agent or model is involved.
 
 - Linux x86-64 with unprivileged user namespaces, so `bwrap` (bubblewrap) can create
   a sandbox. Ubuntu 24.04 restricts them through AppArmor; allow them with
-  `sudo sysctl kernel.apparmor_restrict_unprivileged_userns=0`.
+  `sudo sysctl kernel.apparmor_restrict_unprivileged_userns=0`. In a container this
+  is the host's setting.
 - Python 3.12, clang 18, Lean 4.34.0 and Node 22.23.4.
-- About 2 GB of free disk for the toolchain build.
+- About 4 GB of free disk for the tools (Lean is 2.9 GB extracted; the downloaded
+  archives can be deleted after extracting), and about 6 GB to also run the tests.
 
 On Ubuntu 24.04:
 
 ```sh
 sudo apt-get update
-sudo apt-get install -y --no-install-recommends python3 bubblewrap clang curl ca-certificates xz-utils zstd
+sudo apt-get install -y --no-install-recommends python3 bubblewrap clang curl ca-certificates xz-utils zstd git
 ```
 
 ## Install the toolchain
@@ -65,11 +67,18 @@ python3 bend-spec/scripts/setup-toolchain.py --lean-home ~/proofguard-tools/lean
 AppArmor profiles and its masked `/proc` paths block new namespaces:
 
 ```sh
-docker run --security-opt seccomp=unconfined --security-opt apparmor=unconfined \
-  --security-opt systempaths=unconfined …
+docker run -it --security-opt seccomp=unconfined --security-opt apparmor=unconfined \
+  --security-opt systempaths=unconfined ubuntu:24.04 bash
 ```
 
-Run ProofGuard as a non-root user inside the container.
+The AppArmor `sysctl` from [Requirements](#requirements) must be set on the host.
+The image has no `sudo`: run the `apt-get` and `install` commands above as root,
+without `sudo`. Run everything else as a non-root user:
+
+```sh
+useradd -m dev
+su - dev
+```
 
 ## Run the tests
 
@@ -146,5 +155,8 @@ The worker prints the result and publishes it to `results/<id>.json`:
 `def main(inputs):\n  PGDone{}\n` instead and the result is `"status": "rejected"`
 with reason `mandatory_obligation_failed`, and nothing is written. Without `--once`
 the worker keeps polling until the session expires.
+
+Processed proposals stay in `outbox/` and count toward its
+[128-entry limit](reference/limits.md); clean or rotate the outbox between runs.
 
 To have a model write the program instead, run a [harness](../integrations/pi/README.md).

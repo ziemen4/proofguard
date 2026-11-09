@@ -58,7 +58,8 @@ function convert(page, text) {
       .replace(/\]\(([^)\s]+)\)/g, (_, href) => `](${target(href, page.source)})`))
     .join("");
   const title = page.title ?? heading[1].trim();
-  const edit = `${repository}/edit/${ref}/${page.source}`;
+  // GitHub edits only branches, so every version's edit link opens main.
+  const edit = `${repository}/edit/main/${page.source}`;
   return `---\ntitle: ${JSON.stringify(title)}\neditUrl: ${JSON.stringify(edit)}\n---\n\n${body}`;
 }
 
