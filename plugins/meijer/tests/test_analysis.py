@@ -268,7 +268,7 @@ def main(inputs):
 ''', definition='report_safe')
 
     def test_type_holding_effects_is_followed_instead_of_summarized(self):
-        plan = '''type Plan is Data:
+        plan = '''type Plan is Type:
   Plan{io: PGIO}
 
 def plan(value: PGBytes) -> Plan:

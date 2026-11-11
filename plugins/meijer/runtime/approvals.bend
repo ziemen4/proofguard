@@ -136,22 +136,25 @@ def mj_approval_for(index: PGIndex, required: Decisions, records: mj_Approvals, 
     case PGNext{pred}, DecisionItem{head, tail}:
       mj_approval_for(pred, tail, records, sink, bytes)
 
-def mj_batch_approval_rules(batch: PGIO, +required: Decisions, +records: mj_Approvals) -> Decision:
+# Rebuilds the batch, like mj_check_writes: an unapproved write or an unknown
+# effect ends it with PGAbort.
+def mj_approve_writes(batch: PGIO, +required: Decisions, +records: mj_Approvals) -> PGIO:
   match batch:
     case PGDone{}:
-      Yes{}
+      PGDone{}
     case PGAbort{}:
-      No{}
-    case PGWrite{+sink, bytes, rest}:
-      write_approved = mj_approval_for(sink, required, records, sink, bytes)
-      rest_approved = mj_batch_approval_rules(rest, required, records)
-      mj_both(write_approved, rest_approved)
+      PGAbort{}
+    case PGWrite{+sink, +bytes, rest}:
+      mj_accept_write(mj_approval_for(sink, required, records, sink, bytes), sink, bytes,
+        mj_approve_writes(rest, required, records))
+    case other:
+      PGAbort{}
 
-def mj_validate_approvals(records: mj_Approvals, +batch: PGIO, required: Decisions) -> PGIO:
+def mj_validate_approvals(records: mj_Approvals, batch: PGIO, required: Decisions) -> PGIO:
   match records:
     case mj_BadApprovals{}:
       PGAbort{}
     case mj_NoApprovals{}:
-      mj_accept_batch(mj_batch_approval_rules(batch, required, mj_NoApprovals{}), batch)
+      mj_approve_writes(batch, required, mj_NoApprovals{})
     case mj_Approval{sink, bytes, rest}:
-      mj_accept_batch(mj_batch_approval_rules(batch, required, mj_Approval{sink, bytes, rest}), batch)
+      mj_approve_writes(batch, required, mj_Approval{sink, bytes, rest})
