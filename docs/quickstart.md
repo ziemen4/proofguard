@@ -91,8 +91,8 @@ npm ci --ignore-scripts --prefix integrations/pi
 python3 integrations/pi/review.py
 ```
 
-They run real sandboxes and the real checker. On 8 cores the foundation and Meijer
-suites take about 20 minutes each and pi about 3. Reports land in
+They run real sandboxes and the real checker. On 8 cores the foundation suite takes
+about 30 minutes, Meijer about 20 and pi about 3. Reports land in
 `artifacts/review-stack/`.
 
 ## Enroll a plugin

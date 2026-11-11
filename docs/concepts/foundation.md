@@ -25,7 +25,8 @@ on the execution side, after the checks.
 The owner enrolls one to sixteen [plugins](plugins.md) together with:
 
 - `inputs_base64`: up to 16 private input snapshots the program will read;
-- `session`: an identifier, an expiry time and the absolute destination file paths;
+- `session`: an identifier, an expiry time, the absolute destination file paths
+  and, optionally, HTTP endpoints;
 - optional per-plugin `owner_data` and source `bindings`.
 
 Enrollment reads every plugin file once and stores the result, with the toolchain
@@ -48,21 +49,29 @@ instructions. Plugin sources, law names and input bytes stay with the owner.
 and the agent supplies its definition.
 
 `proofguard/stdlib/effects.bend` defines the types it works with. Inputs and
-destinations are unary indexes (`PGZero{}`, `PGNext{PGZero{}}`, …). The result is
-a batch of effects. The interface currently defines one effect, writing to an
-enrolled destination file:
+destinations and endpoints are unary indexes (`PGZero{}`, `PGNext{PGZero{}}`, …).
+The result is a chain of effects: writing to an enrolled destination file, or
+calling an enrolled HTTP endpoint.
 
 ```bend
-type PGIO is Data:
+type PGIO is Type:
   PGDone{}
   PGAbort{}
   PGWrite{destination: PGIndex, bytes: PGBytes, next: PGIO}
+  PGHttp{request: PGRequest, next: PGResponse -> PGIO}
 ```
 
+`PGHttp`'s `next` is a function that receives the response, so the program, not the
+agent, decides what to do with it. Because `PGIO` holds a function, a `PGIO` value
+can be used only once: it cannot be stored in a `Data` type or declared as a `+`
+argument.
+
 Helpers include `pg_input(index, inputs)`, `pg_write(destination, bytes)`,
-`pg_text("…")`, `pg_append`, and `pg_flatten`/`pg_unflatten` for byte-by-byte
-recursion. The agent can add its own helpers and datatypes but cannot redefine
-anything the interface supplies. `PGAbort` cancels the whole batch.
+`pg_get(endpoint, url)`, `pg_post(endpoint, url, body)`, `pg_http_ok(response)`,
+`pg_http_body(response)`, `pg_text("…")`, `pg_append`, and `pg_flatten`/`pg_unflatten`
+for byte-by-byte recursion. The agent can add its own helpers and datatypes but
+cannot redefine anything the interface supplies. `PGAbort` cancels the writes
+computed since the last call; a call that was sent cannot be undone.
 
 The task's instructions spell out the rules the checker enforces. `main` may use
 `inputs` once; a helper that reads several inputs declares the argument as
@@ -73,6 +82,20 @@ The task's instructions spell out the rules the checker enforces. `main` may use
 ```bend
 def main(inputs):
   pg_write(PGZero{}, pg_input(PGZero{}, inputs))
+```
+
+This one calls endpoint 0 and writes the response body, or `failed`, to destination 0:
+
+```bend
+def save(response: PGResponse) -> PGIO:
+  match response:
+    case PGResponse{status, body}:
+      pg_write(PGZero{}, body)
+    case PGHttpFailed{failure}:
+      pg_write(PGZero{}, pg_text("failed"))
+
+def main(inputs):
+  PGHttp{pg_get(PGZero{}, pg_text("https://api.example.com/v1/status")), save}
 ```
 
 ## The sandbox
@@ -108,16 +131,46 @@ filesystem with a quota if the agent should not be able to fill the disk.
    first if it has one, then Bend and BendTT check its laws. The source is also
    checked against the foundation interface alone. All must accept.
 3. **Execute.** The Bend evaluator runs that same `main` with the private
-   inputs. A plugin's guard runner, if it has one, also runs and must return the
-   identical batch or veto it.
-4. **Apply effects.** A fixed codec decodes the batch; the host never interprets
-   application logic. The gateway validates the whole batch and the expiry, then
-   performs each effect. For file writes it replaces each file atomically:
-   temporary file, flush, rename, flush the directory.
+   inputs until the program ends or reaches a call. The writes computed up to that
+   point, plus the call, are one step. A plugin's guard runner, if it has one, also
+   runs and must return the identical step or veto it.
+4. **Apply effects.** A fixed codec decodes the step; the host never interprets
+   application logic. The gateway validates the whole step and the expiry, then
+   performs it in program order. It replaces each file atomically (temporary file,
+   flush, rename, flush the directory), then sends the call. To continue, it runs
+   `main` again from the start with the responses so far; the run must reproduce
+   every step already performed. A program without calls is a single step.
 5. **Report.** The worker publishes `results/<id>.json`.
 
 The gateway also keeps an append-only audit log in the owner's directory: each
-check, each attempt, the planned writes and the outcome.
+check, each attempt, the planned writes, each call's request digest and response
+status, and the outcome. Owner credentials are never recorded.
+
+## HTTP calls
+
+The owner enrolls up to 16 endpoints in `session.endpoints`. Each one fixes an
+origin, a path prefix and the permitted methods; a call names its endpoint by
+index and the gateway checks the computed URL against that entry at dispatch, so a
+URL built from data gets the same check as a constant. Anything not enrolled is
+refused.
+
+- A program can set only `Accept`, `Accept-Language`, `Content-Type`, `If-Match`
+  and `If-None-Match`. An endpoint's `credential` names a header and a file; the
+  gateway reads the file at dispatch and adds the header itself, so the secret never
+  reaches the program, the agent or the audit log.
+- The gateway resolves the host and connects only to an address it checked. It
+  refuses loopback and private addresses unless the endpoint sets
+  `private_network`, and always refuses link-local (including cloud metadata
+  services), multicast and reserved ones. Redirects are not followed: a 3xx reaches the program as a
+  response.
+- Each call is sent once. Network failures reach the program as `PGHttpFailed`.
+  A timeout or a broken connection after the request was sent leaves the result
+  `uncertain`, because the server may have acted on it.
+- The response goes only to the program. The agent sees the result status, as
+  with writes.
+
+Formats are in [Configuration](../reference/configuration.md#http-endpoints) and
+limits in [Limits](../reference/limits.md).
 
 Steps 2 and 3 run the same text with the same pinned toolchain, so the program
 that runs is the program that was checked. Processed proposal files stay in the
@@ -131,12 +184,13 @@ Each result file holds `schema`, `proposal`, `status`, `reason`, `source_id`,
 
 | Status | Reason | When |
 | --- | --- | --- |
-| `completed` | none | Every effect in the batch was performed. |
+| `completed` | none | The program ended and every effect was performed. |
 | `rejected` | `invalid_program_source` | The file could not be read as a proposal: a link, FIFO, empty or non-UTF-8 file, or one that changed while being read. |
 | `rejected` | `mandatory_obligation_failed` | Verification failed. Syntax and type errors from the foundation check come with the checker's diagnostics; a plugin failure only says `Program rejected by gateway verification.` |
-| `rejected` | `execution_refused` | The program was accepted but stopped before any effect: `PGAbort`, a guard veto or changed batch, an evaluator error or timeout, or a write to a destination that is not enrolled. |
+| `rejected` | `execution_refused` | The program was accepted but stopped before any effect: `PGAbort`, a guard veto or changed step, an evaluator error or timeout, or a write or call the enrollment does not allow. |
 | `rejected` | `session_unavailable` | The session expired before checking, or something the enrollment pinned changed, such as a plugin's verifier. |
-| `uncertain` | `owner_reconciliation_required` | Something failed after the first destination was replaced. Earlier effects may have happened; the owner checks the files. |
+| `stopped` | `stopped_after_effects` | The program stopped after some effects, through `PGAbort`, a guard veto or a denied write or call. Every performed effect is known and stands; the rest of the step was not performed. |
+| `uncertain` | `owner_reconciliation_required` | Something failed after the first effect began, or a sent call got no answer. Earlier effects may have happened; the owner checks the files and endpoints. |
 
 Nothing is performed for any `rejected` result.
 
@@ -154,7 +208,7 @@ To review the foundation, read in this order:
 | `proofguard/admission.py` | Can anything run without acceptance of these exact bytes? |
 | `bend-spec/backend/program.mjs` | Do checking and evaluation use the same order? |
 | `bend-spec/backend/io.mjs`, `proofguard/effects.py` | Does the codec only decode concrete bytes? |
-| `proofguard/gateway.py` | Is every execution verified first? |
+| `proofguard/gateway.py`, `http.py` | Is every execution verified first? Can a call reach anything not enrolled? |
 | `proofguard/worker.py` | Can a proposal change anything the owner fixed? |
 | `proofguard/sandbox.py` | What can the agent reach? |
 | `tests/core/` | Do the real sandbox and effect tests match these claims? |

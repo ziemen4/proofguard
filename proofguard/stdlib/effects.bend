@@ -76,10 +76,41 @@ type PGPrivate is Data:
 type PGOwnerContext is Data:
   PGOwnerContext{value: PGPrivate}
 
-type PGIO is Data:
+type PGMethod is Data:
+  PGGet{}
+  PGPost{}
+  PGPut{}
+  PGPatch{}
+  PGDelete{}
+
+type PGHeaders is Data:
+  PGNoHeaders{}
+  PGHeader{name: PGBytes, value: PGBytes, rest: PGHeaders}
+
+# endpoint selects an owner-enrolled entry, as PGIndex selects a destination.
+# The host checks the complete computed url against that entry before sending.
+type PGRequest is Data:
+  PGRequest{endpoint: PGIndex, method: PGMethod, url: PGBytes, headers: PGHeaders, body: PGBytes}
+
+type PGStatus is Data:
+  PGStatus{hundreds: PGNibble, tens: PGNibble, ones: PGNibble}
+
+type PGHttpFailure is Data:
+  PGHttpUnreachable{}
+  PGHttpTimeout{}
+  PGHttpBroken{}
+  PGHttpOversized{}
+
+type PGResponse is Data:
+  PGResponse{status: PGStatus, body: PGBytes}
+  PGHttpFailed{failure: PGHttpFailure}
+
+# PGHttp holds a function, so PGIO is linear: a value of this type is used once.
+type PGIO is Type:
   PGDone{}
   PGAbort{}
   PGWrite{destination: PGIndex, bytes: PGBytes, next: PGIO}
+  PGHttp{request: PGRequest, next: PGResponse -> PGIO}
 
 def pg_append(left: PGBytes, right: PGBytes) -> PGBytes:
   match left:
@@ -128,6 +159,33 @@ def pg_byte(high: PGNibble, low: PGNibble, tail: PGBytes) -> PGBytes:
 
 def pg_write(destination: PGIndex, bytes: PGBytes) -> PGIO:
   PGWrite{destination, bytes, PGDone{}}
+
+def pg_get(endpoint: PGIndex, url: PGBytes) -> PGRequest:
+  PGRequest{endpoint, PGGet{}, url, PGNoHeaders{}, PGEndBytes{}}
+
+def pg_post(endpoint: PGIndex, url: PGBytes, body: PGBytes) -> PGRequest:
+  PGRequest{endpoint, PGPost{}, url, PGNoHeaders{}, body}
+
+def pg_http_body(response: PGResponse) -> PGBytes:
+  match response:
+    case PGResponse{status, body}:
+      body
+    case PGHttpFailed{failure}:
+      PGEndBytes{}
+
+def pg_status_ok(status: PGStatus) -> Bool:
+  match status:
+    case PGStatus{PGHex2{}, tens, ones}:
+      True{}
+    case PGStatus{other, tens, ones}:
+      False{}
+
+def pg_http_ok(response: PGResponse) -> Bool:
+  match response:
+    case PGResponse{status, body}:
+      pg_status_ok(status)
+    case PGHttpFailed{failure}:
+      False{}
 
 # Agent text: pg_text("...") encodes a Bend string as UTF-8 bytes.
 def pg_nibble(a: Bool, b: Bool, c: Bool, d: Bool) -> PGNibble:

@@ -7,9 +7,10 @@ the program only after it is accepted, as runtime arguments.
 
 The agent gets the foundation interface and the owner's brief. The brief describes
 the inputs, for example "input 0 is a CSV of orders, input 1 is a customer list",
-and the destinations by index. The agent writes code that processes the data it
-was told about; it never receives the bytes. Anything that depends on the contents,
-such as filtering rows, happens inside the Bend program at run time.
+and the destinations and endpoints by index. The agent writes code that processes
+the data it was told about; it never receives the bytes. Anything that depends on
+the contents, such as filtering rows, happens inside the Bend program at run time.
+HTTP responses work the same way: they reach the program, never the agent.
 
 The agent does read each proposal's result. Whether a program completed or was
 rejected can depend on the private inputs, so a plugin that keeps data from the

@@ -16,7 +16,7 @@ import time
 from bendspec.backend import ROOT, PluginCheck, Toolchain, execute, verify
 from bendspec.model import Bundle, ContractError, Source, canonical, decode, fields, names
 from .context import ExecutionContext, PrivateData, encode_owner_data
-from .effects import Write, decode_writes
+from .effects import Evaluation, Exchange, decode_step, encode_response
 
 
 ISOLATED_NAME = re.compile(r"\bp[0-9a-f]{12}_")
@@ -102,8 +102,14 @@ class BendAdmission:
         return receipt
 
     def execute_program(self, program: VerifiedProgram, timeout: float = 60,
-                        *, context: ExecutionContext | None = None) -> tuple[Write, ...]:
-        """Execute accepted Bend source and decode its bounded primitive writes."""
+                        *, context: ExecutionContext | None = None,
+                        history: tuple[Exchange, ...] = ()) -> Evaluation:
+        """Execute accepted Bend source to its next call or its end.
+
+        history resumes the program past calls already made. Evaluation stays
+        pure: it restarts from main, receives each recorded response in turn
+        and only reports the effect that follows.
+        """
         receipt = self.validate_program(program)
         if self.checker is not None and (context is None or len(context.inputs) != self.input_count):
             raise ContractError("execution input count differs from plugin verification")
@@ -121,12 +127,14 @@ class BendAdmission:
             inputs["call"]["private_inputs"] = [base64.b64encode(data).decode() for data in context.inputs]
             if self.owner_argument:
                 inputs["call"]["owner_context"] = {"schema": 1, "data": encode_owner_data(self.owner)}
+        if history:
+            inputs["call"]["responses"] = [encode_response(item.response) for item in history]
         with tempfile.TemporaryDirectory(prefix="proofguard-evaluate-") as directory:
             result = execute([
                 str(self.toolchain.node), "--experimental-strip-types",
                 "--max-old-space-size=4096", "--stack-size=7000", str(ROOT / "backend/evaluate.mjs"),
                 str(self.toolchain.source.resolve()),
-            ], canonical(inputs), Path(directory), timeout, output_limit=2 * 1024 * 1024)
+            ], canonical(inputs), Path(directory), timeout, output_limit=4 * 1024 * 1024)
         if result.status != 0 or result.timed_out:
             raise ContractError(f"checked source evaluation failed (status={result.status}, timeout={result.timed_out}): "
                                 + result.output)
@@ -135,7 +143,7 @@ class BendAdmission:
             raise ContractError("invalid evaluator response")
         if self.toolchain.validate() != receipt["toolchain"]:
             raise ContractError("toolchain changed during evaluation")
-        return decode_writes(reply["value"])
+        return decode_step(reply["value"], tuple(item.step for item in history))
 
 
 @dataclass(frozen=True)
@@ -191,8 +199,9 @@ class ProgramAdmission:
         return VerifiedProgram(source, raw, self._issuer, hashlib.sha256(raw).hexdigest(), tuple(checked))
 
     def execute_program(self, program: VerifiedProgram, timeout: float = 60,
-                        *, context: ExecutionContext | None = None) -> tuple[Write, ...]:
-        """Run original main; plugin guards may veto but cannot replace its batch."""
+                        *, context: ExecutionContext | None = None,
+                        history: tuple[Exchange, ...] = ()) -> Evaluation:
+        """Run original main to its next call or end; guards may veto but cannot replace it."""
         if not isinstance(program, VerifiedProgram) or program.issuer is not self._issuer:
             raise ContractError("execution requires this gate's verified program")
         if hashlib.sha256(program.receipt_bytes).hexdigest() != program.receipt_sha256:
@@ -212,7 +221,7 @@ class ProgramAdmission:
         if program.receipt_bytes != canonical(expected):
             raise ContractError("verified program binding mismatch")
         deadline = time.monotonic() + timeout
-        writes = self.runtime.execute_program(program.components[0], timeout, context=context)
+        result = self.runtime.execute_program(program.components[0], timeout, context=context, history=history)
         for gate, part in zip(self.plugins, program.components[1:]):
             if gate.entrypoint == "main":
                 continue
@@ -220,8 +229,8 @@ class ProgramAdmission:
             if remaining <= 0:
                 raise ContractError("execution deadline exceeded")
             # Bend guard runners compute main and check concrete values.
-            # Comparing the complete batch prevents a runner from substituting
+            # Comparing the complete step prevents a runner from substituting
             # its own effect. All evaluation remains pure until Gateway dispatch.
-            if gate.execute_program(part, remaining, context=context) != writes:
+            if gate.execute_program(part, remaining, context=context, history=history) != result:
                 raise ContractError("plugin guard changed the program's effect batch")
-        return writes
+        return result

@@ -12,8 +12,8 @@ npm ci --ignore-scripts --prefix integrations/pi
 python3 integrations/pi/review.py
 ```
 
-They use real sandboxes and the real checker; foundation and Meijer take about 20
-minutes each on 8 cores. CI runs all of them on every pull request and fails on any
+They use real sandboxes and the real checker; on 8 cores foundation takes about 30
+minutes and Meijer about 20. CI runs all of them on every pull request and fails on any
 failure or skipped test.
 
 ## Structure

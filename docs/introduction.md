@@ -7,22 +7,23 @@ the agent never holds.
 
 The architecture has three parts. The **foundation** implements the split. **Plugins**
 add the owner's rules to the checking step. **Harnesses** connect an agent runtime to
-the planning step. Programs act through a fixed effect interface, which today has one
-effect: writing files the owner enrolled.
+the planning step. Programs act through a fixed effect interface with two effects:
+writing files and calling HTTP endpoints, both enrolled by the owner.
 
 ## How it works
 
 ![The harness's model writes a Bend2 program; the foundation checks it against the plugins' laws, and the gateway runs it and applies its effects.](assets/overview.svg)
 
 1. The owner **enrolls** one or more plugins and freezes the session: private
-   inputs, destination files and a deadline.
+   inputs, destination files, HTTP endpoints and a deadline.
 2. The agent runs in a networkless sandbox. It reads a public task and writes a
    `main(inputs)` program to an outbox, its only writable host directory.
 3. The owner's worker takes the program from the outbox. Every plugin checks its laws against
    it with Bend and the BendTT kernel, and the program must type-check against the
    foundation's interface.
-4. The gateway runs that same source with the private inputs. The program
-   returns a batch of effects, which the gateway validates and performs.
+4. The gateway runs that same source with the private inputs. It validates and
+   performs each effect the program returns; an HTTP response goes back to the
+   program, never to the agent.
 5. The agent reads a short status. A plugin rejection says only that a check
    failed; syntax and type errors in the agent's own code come back so it can fix them.
 
