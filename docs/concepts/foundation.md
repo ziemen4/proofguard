@@ -189,10 +189,16 @@ Each result file holds `schema`, `proposal`, `status`, `reason`, `source_id`,
 | `rejected` | `mandatory_obligation_failed` | Verification failed. Syntax and type errors from the foundation check come with the checker's diagnostics; a plugin failure only says `Program rejected by gateway verification.` |
 | `rejected` | `execution_refused` | The program was accepted but stopped before any effect: `PGAbort`, a guard veto or changed step, an evaluator error or timeout, or a write or call the enrollment does not allow. |
 | `rejected` | `session_unavailable` | The session expired before checking, or something the enrollment pinned changed, such as a plugin's verifier. |
-| `stopped` | `stopped_after_effects` | The program stopped after some effects, through `PGAbort`, a guard veto or a denied write or call. Every performed effect is known and stands; the rest of the step was not performed. |
-| `uncertain` | `owner_reconciliation_required` | Something failed after the first effect began, or a sent call got no answer. Earlier effects may have happened; the owner checks the files and endpoints. |
+| `stopped` | `stopped_after_effects` | The program stopped between effects, after some had been performed: `PGAbort`, a guard veto, a denied write or call, an evaluator error or the deadline. Every performed effect is known and stands; the rest of the step was not performed. |
+| `uncertain` | `owner_reconciliation_required` | Something failed while an effect was being performed, or a sent call got no answer. That effect may have happened; the owner checks the files and endpoints. |
 
 Nothing is performed for any `rejected` result.
+
+The owner's audit log also records where a run ended. A step's effects are its
+writes in program order, then its call; positions are `[step, effect]`, from 1. A
+`stopped` record has `stopped_at`, the first effect that was not performed. An
+`uncertain` record has `in_doubt`, the effects whose outcome is unknown. The agent's
+result carries neither, because where a program stops can depend on private inputs.
 
 The worker processes each proposal ID once and never retries it. A new ID is a new
 request: it is verified again and may repeat an earlier effect. After a rejection

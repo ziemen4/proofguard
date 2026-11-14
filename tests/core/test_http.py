@@ -18,7 +18,7 @@ from unittest.mock import patch
 from bendspec.model import ContractError
 from proofguard.effects import (EffectDenied, HttpFailure, HttpMethod, HttpRequest, HttpResponse, ProgramAborted,
                                 Step, Write, decode_step)
-from proofguard.gateway import EffectUncertain, ExecutionRefused, ExecutionStopped
+from proofguard.gateway import EffectUncertain, ExecutionRefused, ExecutionStopped, GatewayError
 from proofguard.http import (MAX_BODY_BYTES, AuthorizedCall, Endpoint, HttpTransport, is_permitted_address,
                              parse_endpoints)
 from proofguard.plugin import Plugin
@@ -110,7 +110,8 @@ class EndpointTests(unittest.TestCase):
             parse_endpoints([endpoint.data(), endpoint.data()])
 
     def test_private_addresses_need_a_grant_and_metadata_never_passes(self):
-        for address in ("127.0.0.1", "10.0.0.8", "192.168.1.1", "::1", "::ffff:127.0.0.1", "fd00::1"):
+        for address in ("127.0.0.1", "10.0.0.8", "192.168.1.1", "::1", "::ffff:127.0.0.1", "fd00::1",
+                        "fec0::1"):
             with self.subTest(address=address):
                 self.assertFalse(is_permitted_address(address, False))
                 self.assertTrue(is_permitted_address(address, True))
@@ -313,7 +314,9 @@ class GatewayTests(unittest.TestCase):
             self.assertEqual(len(stopped.exception.calls), 1)
             self.assertIsInstance(stopped.exception.__cause__, ProgramAborted)
             self.assertEqual(len(server.requests), 1)
-            self.assertEqual(len(self.records(gateway, "stopped")), 1)
+            # Owner-side, the run says where it stopped: the first effect of step 2.
+            self.assertEqual(stopped.exception.stopped_at, (2, 1))
+            self.assertEqual([row["stopped_at"] for row in self.records(gateway, "stopped")], [[2, 1]])
 
     def test_abort_before_the_first_call_cancels_its_step(self):
         with LoopbackServer() as server:
@@ -356,7 +359,41 @@ class GatewayTests(unittest.TestCase):
             self.assertEqual(uncertain.exception.calls[0][2], "timeout")
             self.assertEqual(len(server.requests), 1)
             self.assertEqual(self.records(gateway, "http_finished")[0]["ambiguous"], True)
-            self.assertEqual(len(self.records(gateway, "uncertain")), 1)
+            self.assertEqual(uncertain.exception.in_doubt, ((1, 1),))
+            self.assertEqual([row["in_doubt"] for row in self.records(gateway, "uncertain")], [[[1, 1]]])
+
+    def test_a_failure_between_effects_stops_and_one_during_an_effect_is_uncertain(self):
+        source = REPORT + f'def main(inputs):\n  PGWrite{{{ONE}, pg_text("kept"), {{call}}}}\n'
+        with LoopbackServer() as server:
+            gateway = self.enroll([server.endpoint()])
+            admission = type(gateway.admission)
+            execute = admission.execute_program
+
+            def fail_on_resume(*args, **kwargs):
+                if kwargs["history"]:
+                    raise GatewayError("evaluator failed")
+                return execute(*args, **kwargs)
+
+            with patch.object(admission, "execute_program", autospec=True, side_effect=fail_on_resume):
+                with self.assertRaises(ExecutionStopped) as stopped:
+                    gateway.submit(source.replace("{call}", get(server.origin + "/x")))
+            self.assertEqual((len(stopped.exception.completed), len(stopped.exception.calls)), (1, 1))
+            self.assertEqual(stopped.exception.stopped_at, (2, 1))
+            self.assertEqual(len(self.records(gateway, "stopped")), 1)
+
+            store = gateway.audit.store
+
+            def lose_the_outcome(record):
+                if record.get("kind") == "http_finished":
+                    raise OSError("disk full")
+                return store(record)
+
+            with patch.object(gateway.audit, "store", side_effect=lose_the_outcome):
+                with self.assertRaises(EffectUncertain) as uncertain:
+                    gateway.submit(source.replace("{call}", get(server.origin + "/y")))
+            self.assertEqual(len(server.requests), 2)
+            # The write is effect 1 of step 1; the call after it is the one in doubt.
+            self.assertEqual(uncertain.exception.in_doubt, ((1, 2),))
 
     def test_status_helpers_read_the_response(self):
         decide = '''def decide(ok: Bool) -> PGIO:
@@ -512,6 +549,11 @@ class WorkerTests(unittest.TestCase):
             timed_out = worker.process(write_proposal(
                 worker.outbox, STOP + f'def main(inputs):\n  {get(server.origin + "/slow", "stop")}\n'))
             self.assertEqual((timed_out.status, timed_out.reason), (Status.UNCERTAIN, "owner_reconciliation_required"))
+            # Where a run stopped stays with the owner: it can depend on private inputs.
+            for result in (aborted, timed_out):
+                published = (worker.results / f"{result.proposal}.json").read_text()
+                self.assertNotIn("stopped_at", published)
+                self.assertNotIn("in_doubt", published)
 
     def test_a_crash_after_sending_never_sends_again(self):
         def crash(audit_store, record):

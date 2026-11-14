@@ -55,9 +55,10 @@ works this way.
 
 **Guard runner.** Some checks need the actual bytes, such as an approval for an
 exact payload. A guard runner is a Bend function that calls the agent's `main`,
-inspects the resulting batch and returns it unchanged or returns `PGAbort`. The
-foundation runs `main` separately and writes nothing unless every guard returns
-the identical batch. A guard can veto a batch but never change it.
+rebuilds the effects as it checks them, and ends them with `PGAbort` to veto. The
+foundation runs `main` separately, step by step, and performs a step only when
+every guard returns the identical step. A guard can veto a step but never change
+it. See [Write a plugin](../guides/write-a-plugin.md#4-optional-guard-runner).
 
 **Owner data.** A guard can also receive private records the owner supplies at
 enrollment, as a `PGOwnerContext` argument. See [Private data](private-data.md).

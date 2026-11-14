@@ -18,7 +18,7 @@ from bendspec.model import canonical, decode
 from .admission import AdmissionRejected, ProgramAdmission, VerifiedProgram
 from .audit import Audit, durable_directory, sync_directory
 from .context import ExecutionContext
-from .effects import EffectDenied, Exchange, HttpRequest, HttpResponse, ProgramAborted, Step, Write
+from .effects import EffectDenied, Exchange, HttpRequest, HttpResponse, Step, Write
 from .encoding import commitment
 from .http import MAX_CALLS, AuthorizedCall, Delivery, Endpoint, HttpTransport
 
@@ -35,27 +35,42 @@ class ExecutionRefused(GatewayError):
     """Evaluation or a guard stopped the run before any effect began."""
 
 
+# Where an effect sits in a run: (step, effect), both from 1. A step's effects
+# are its writes in program order, then its call.
+Position = tuple[int, int]
+
+
 class ExecutionStopped(GatewayError):
-    """The run stopped after effects; each of them has a known outcome and stands."""
+    """The run stopped after effects; each of them has a known outcome and stands.
+
+    stopped_at is the first effect that was not performed. Owner-side only: the
+    agent's result does not say where a run stopped.
+    """
 
     def __init__(self, intent_id: str, request_id: str | None, completed: tuple[tuple[int, str], ...],
-                 calls: tuple[tuple[int, str, str], ...]):
+                 calls: tuple[tuple[int, str, str], ...], stopped_at: Position):
         super().__init__("execution stopped after completed effects")
         self.intent_id, self.request_id = intent_id, request_id
         self.completed, self.calls = completed, calls
+        self.stopped_at = stopped_at
 
 
 class EffectUncertain(GatewayError):
-    """An execution failed; some effects may already have happened."""
+    """An execution failed; some effects may already have happened.
+
+    in_doubt lists the effects whose outcome is unknown. It is empty when only
+    the archive of a known outcome failed. Owner-side only, like stopped_at.
+    """
 
     def __init__(self, intent_id: str, request_id: str | None,
                  completed: tuple[tuple[int, str], ...], archive_durable: bool,
-                 calls: tuple[tuple[int, str, str], ...] = ()):
+                 calls: tuple[tuple[int, str, str], ...] = (), in_doubt: tuple[Position, ...] = ()):
         super().__init__("execution failed; owner reconciliation may be required")
         self.request_id, self.completed = request_id, completed
         self.intent_id = intent_id
         self.archive_durable = archive_durable
         self.calls = calls
+        self.in_doubt = in_doubt
 
 
 @dataclass(frozen=True)
@@ -106,8 +121,26 @@ class Run:
     completed: list[tuple[int, str]] = field(default_factory=list)
     calls: list[tuple[int, str, str]] = field(default_factory=list)
     writes: int = 0
-    ambiguous: bool = False
     dispatched: bool = False
+    # True from the moment an effect may have begun until its outcome is
+    # recorded; a failure in that window leaves that effect unknown.
+    in_flight: bool = False
+    # The step being run and how many of its effects are done, from which the
+    # position of the next effect follows.
+    step: int = 0
+    done: int = 0
+    # Effects that happened with an unknown outcome, such as a timed-out call.
+    in_doubt: list[Position] = field(default_factory=list)
+
+    @property
+    def next_effect(self) -> Position:
+        return (self.step, self.done + 1)
+
+    def finish_effect(self, ambiguous: bool = False) -> None:
+        if ambiguous:
+            self.in_doubt.append(self.next_effect)
+        self.done += 1
+        self.in_flight = False
 
 
 def commit_request(request: HttpRequest) -> str:
@@ -232,13 +265,14 @@ class Gateway:
                 os.fsync(output.fileno())
             # The rename is the first change to a destination; a failure while
             # preparing the temporary file leaves every file unchanged.
-            run.dispatched = True
+            run.dispatched = run.in_flight = True
             os.replace(temporary, destination)
             sync_directory(destination.parent)
         finally:
             if os.path.exists(temporary):
                 os.unlink(temporary)
         run.completed.append((write.capability, commitment("payload", write.data)))
+        run.finish_effect()
 
     def _dispatch_call(self, step: Step, call: AuthorizedCall, run: Run, prepared: Prepared) -> None:
         """Send one call under a durable record; its response stays in this run."""
@@ -252,7 +286,7 @@ class Gateway:
                           "intent_id": prepared.intent_id, "request_id": run.request_id, "sequence": sequence,
                           "endpoint": step.request.endpoint, "request": request})
         wrote = run.dispatched
-        run.dispatched = True
+        run.dispatched = run.in_flight = True
         delivery = self.transport.send(call)
         response = delivery.result if isinstance(delivery.result, HttpResponse) else None
         self.audit.store({"schema": 1, "kind": "http_finished", "session": self.session.identifier,
@@ -263,9 +297,9 @@ class Gateway:
                           "response_bytes": None if response is None else len(response.body)})
         run.history.append(Exchange(step, delivery.result))
         run.calls.append((step.request.endpoint, request, get_outcome(delivery)))
-        run.ambiguous = run.ambiguous or delivery.ambiguous
         # A call that never left the host is no effect to reconcile.
         run.dispatched = wrote or delivery.sent
+        run.finish_effect(delivery.ambiguous)
 
     def _execute(self, prepared: Prepared, run: Run) -> None:
         """Evaluate until an effect, dispatch it, and resume until the program ends.
@@ -276,6 +310,7 @@ class Gateway:
         """
         deadline = time.monotonic() + RUN_SECONDS
         while True:
+            run.step, run.done = run.step + 1, 0
             remaining = deadline - time.monotonic()
             if remaining <= 0:
                 raise GatewayError("execution deadline exceeded")
@@ -306,7 +341,7 @@ class Gateway:
             if time.time() >= session.expires:
                 raise GatewayError("session expired before application execution")
             self._execute(prepared, run)
-            if run.ambiguous:
+            if run.in_doubt:
                 raise GatewayError("a sent call may have reached its server")
             receipt = WriteReceipt(run.request_id, session.identifier, self.admission.contract.identity,
                                    prepared.source_id, session.context_id, tuple(run.completed), prepared.check_id,
@@ -314,20 +349,25 @@ class Gateway:
             self.audit.store({"schema": 1, "kind": "completed", "receipt": asdict(receipt)})
             return receipt
         except (OSError, GatewayError, ValueError) as exc:
-            # A program or policy stop leaves every effect's outcome known. Any
-            # other failure after dispatch began leaves at least one unknown.
-            stopped = run.dispatched and not run.ambiguous and isinstance(exc, (ProgramAborted, EffectDenied))
+            # A failure between effects leaves every outcome known: the run
+            # stopped. One while an effect was in flight leaves that one unknown.
+            stopped = run.dispatched and not run.in_doubt and not run.in_flight
+            in_doubt = (*run.in_doubt, *([run.next_effect] if run.in_flight else []))
+            position = {"stopped_at": list(run.next_effect)} if stopped else {
+                "in_doubt": [list(item) for item in in_doubt]} if run.dispatched else {}
             archive_durable = True
             try:
                 self.audit.store({"schema": 1, "request_id": run.request_id, "intent_id": intent_id,
                                   "kind": "stopped" if stopped else "uncertain" if run.dispatched else "refused",
                                   "session": session.identifier, "check_id": prepared.check_id,
-                                  "proposal": proposal, "completed": run.completed, "calls": run.calls})
+                                  "proposal": proposal, "completed": run.completed, "calls": run.calls,
+                                  **position})
             except (OSError, ValueError):
                 archive_durable = False
             if not run.dispatched:
                 raise ExecutionRefused("execution stopped before any effect") from exc
             if stopped and archive_durable:
-                raise ExecutionStopped(intent_id, run.request_id, tuple(run.completed), tuple(run.calls)) from exc
+                raise ExecutionStopped(intent_id, run.request_id, tuple(run.completed), tuple(run.calls),
+                                       run.next_effect) from exc
             raise EffectUncertain(intent_id, run.request_id, tuple(run.completed), archive_durable,
-                                  tuple(run.calls)) from exc
+                                  tuple(run.calls), in_doubt) from exc

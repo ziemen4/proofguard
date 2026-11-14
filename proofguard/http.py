@@ -214,7 +214,10 @@ def is_permitted_address(value: str, private_network: bool) -> bool:
     # Link-local covers cloud metadata services, so no enrollment reaches it.
     if address.is_multicast or address.is_unspecified or address.is_reserved or address.is_link_local:
         return False
-    return address.is_global or (private_network and address.is_private)
+    # Deprecated site-local (fec0::/10) is still routed privately on some
+    # networks, and ipaddress counts it as global.
+    private = address.is_private or (address.version == 6 and address.is_site_local)
+    return (address.is_global and not private) or (private_network and private)
 
 
 def resolve_addresses(host: str, port: int, timeout: float) -> list[str]:
