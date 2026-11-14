@@ -1,3 +1,7 @@
+const METHODS = { PGGet: 'GET', PGPost: 'POST', PGPut: 'PUT', PGPatch: 'PATCH', PGDelete: 'DELETE' };
+const FAILURES = { unreachable: 'PGHttpUnreachable', timeout: 'PGHttpTimeout',
+  broken: 'PGHttpBroken', oversized: 'PGHttpOversized' };
+
 /** Construct closed typed input data; private bytes are never parsed as code. */
 function bytePacker(B) {
   const digits = [...'0123456789ABCDEF'].map(digit => B.Ctr('PGHex' + digit, []));
@@ -65,8 +69,35 @@ export function runtimeOwnerTerm(B, context) {
   return B.Ctr('PGOwnerContext', [build(context.data, 0)]);
 }
 
-/** Encode the fixed primitive IO ABI after Bend has computed every value. */
-export function encodePrimitiveIO(value) {
+/** Build the PGResponse a recorded HTTP exchange gives its continuation. */
+export function runtimeResponseTerm(B, response) {
+  if (response === null || typeof response !== 'object' || Array.isArray(response)) {
+    throw new Error('Invalid recorded response');
+  }
+  const keys = Object.keys(response).sort().join(',');
+  if (keys === 'failure') {
+    const name = FAILURES[response.failure];
+    if (typeof name !== 'string' || !Object.hasOwn(FAILURES, response.failure)) throw new Error('Invalid recorded failure');
+    return B.Ctr('PGHttpFailed', [B.Ctr(name, [])]);
+  }
+  if (keys !== 'body_base64,status' || !Number.isInteger(response.status)
+      || response.status < 100 || response.status > 999) throw new Error('Invalid recorded response');
+  checkEncoding(response.body_base64, 65536);
+  const digits = [...String(response.status)].map(digit => B.Ctr('PGHex' + digit, []));
+  return B.Ctr('PGResponse', [B.Ctr('PGStatus', digits), bytePacker(B)(response.body_base64)]);
+}
+
+/** Leave closed terms as they are; the evaluator supplies Bend's own reduction. */
+const CLOSED = { head: term => term, full: term => term };
+
+/** Encode the fixed primitive IO ABI one effect step at a time.
+ * Writes before a PGHttp form one step. The host dispatches a step before it
+ * asks for the next, so only the current step can still be cancelled. Recorded
+ * responses resume the program past calls it already made: every run restarts
+ * from main and re-derives those requests, which the host compares and never
+ * sends again. Continuations are entered only after their response exists.
+ */
+export function encodePrimitiveIO(value, reduce = CLOSED, responses = []) {
   const ctr = term => {
     if (term?.$ !== 'Ctr' || typeof term.k !== 'string' || !Array.isArray(term.x)) {
       throw new Error('Expected a concrete primitive IO constructor');
@@ -107,16 +138,44 @@ export function encodePrimitiveIO(value) {
     }
     return Buffer.from(data).toString('base64');
   };
-  const writes = [];
+  const headers = term => {
+    const result = [];
+    while (true) {
+      const [name, args] = ctr(term);
+      if (name === 'PGNoHeaders' && args.length === 0) return result;
+      if (name !== 'PGHeader' || args.length !== 3 || result.length === 16) throw new Error('Invalid or oversized headers');
+      result.push({ name_base64: bytes(args[0]), value_base64: bytes(args[1]) });
+      term = args[2];
+    }
+  };
+  const request = term => {
+    const [name, args] = ctr(term);
+    if (name !== 'PGRequest' || args.length !== 5) throw new Error('Invalid primitive request');
+    const [method, unit] = ctr(args[1]);
+    if (!Object.hasOwn(METHODS, method) || unit.length !== 0) throw new Error('Invalid request method');
+    return { endpoint: index(args[0]), method: METHODS[method], url_base64: bytes(args[2]),
+      headers: headers(args[3]), body_base64: bytes(args[4]) };
+  };
+  const completed = [];
+  let writes = [];
+  const frame = fields => ({ schema: 1, ...(completed.length ? { completed } : {}), ...fields });
   while (true) {
-    const [name, args] = ctr(value);
-    // The host has not dispatched any prefix; abort discards the whole batch.
-    if (name === 'PGAbort' && args.length === 0) return { schema: 1, abort: true };
-    if (name === 'PGDone' && args.length === 0) return { schema: 1, writes };
+    const [name, args] = ctr(reduce.head(value));
+    // The host has not dispatched this step; abort discards all of its writes.
+    if (name === 'PGAbort' && args.length === 0) return frame({ abort: true });
+    if (name === 'PGDone' && args.length === 0) return frame({ writes });
+    if (name === 'PGHttp' && args.length === 2) {
+      const http = request(reduce.full(args[0]));
+      if (completed.length === responses.length) return frame({ writes, http });
+      completed.push({ schema: 1, writes, http });
+      value = reduce.resume(args[1], responses[completed.length - 1]);
+      writes = [];
+      continue;
+    }
     if (name !== 'PGWrite' || args.length !== 3 || writes.length === 16) {
       throw new Error('Unsupported or oversized primitive IO');
     }
-    writes.push({ destination: index(args[0]), bytes_base64: bytes(args[1]) });
+    writes.push({ destination: index(reduce.full(args[0])), bytes_base64: bytes(reduce.full(args[1])) });
     value = args[2];
   }
 }

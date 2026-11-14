@@ -34,7 +34,7 @@ and [Security model](docs/concepts/security-model.md) for what is enforced and t
 - Verify every submission, even after a successful preview or prior execution.
 - Archive each execution attempt before application execution. A session can
   accept multiple proposals until expiry; never automatically retry a claimed ID.
-- Only the gateway writes protected destinations. Packages contain Bend code;
+- Only the gateway writes protected destinations and calls enrolled endpoints. Packages contain Bend code;
   never restore a Python application callback or interpreter as a fallback.
 - The host decodes only the fixed primitive IO result. Application computation
   and conditional behavior belong in the checked Bend program/library.

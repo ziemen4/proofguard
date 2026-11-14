@@ -7,7 +7,7 @@ import subprocess
 import unittest
 
 from bendspec.model import ContractError
-from proofguard.effects import ProgramAborted, decode_writes
+from proofguard.effects import HttpMethod, ProgramAborted, decode_step, decode_writes
 
 CODEC = (Path(__file__).resolve().parents[2] / "bend-spec/backend/io.mjs").as_uri()
 
@@ -115,6 +115,44 @@ class PrimitiveTests(unittest.TestCase):
                     "{schema:1,data:{bytes_base64:Buffer.alloc(4198401).toString('base64')}}]) {"
                     "let rejected=false;try{runtimeOwnerTerm({Ctr},v)}catch{rejected=true}"
                     "if(!rejected)throw Error('malformed context accepted');}")
+        result = subprocess.run(["/usr/bin/node", "--input-type=module", "-e", script],
+                                capture_output=True, text=True, timeout=10, env={"PATH": "/usr/bin:/bin"})
+        self.assertEqual(result.returncode, 0, result.stderr)
+
+    def test_a_pending_call_ends_the_step_without_entering_its_continuation(self):
+        request = ctr("PGRequest", ctr("PGNext", ctr("PGZero")), ctr("PGPost"), ctr("PGByte", ctr("PGHex6"), ctr("PGHex1"), ctr("PGEndBytes")),
+                      ctr("PGHeader", ctr("PGEndBytes"), ctr("PGEndBytes"), ctr("PGNoHeaders")), ctr("PGEndBytes"))
+        # The continuation is not data, so walking into it would fail the encoder.
+        value = ctr("PGWrite", ctr("PGZero"), ctr("PGEndBytes"), ctr("PGHttp", request, {"$": "Lam"}))
+        frame = encode_frame(value)
+        self.assertEqual(frame, {"schema": 1, "writes": [{"destination": 0, "bytes_base64": ""}],
+                                 "http": {"endpoint": 1, "method": "POST", "url_base64": "YQ==", "body_base64": "",
+                                          "headers": [{"name_base64": "", "value_base64": ""}]}})
+        step = decode_step(frame, ())
+        self.assertEqual((len(step.writes), step.request.method, step.request.url), (1, HttpMethod.POST, b"a"))
+
+    def test_malformed_requests_reject(self):
+        for request in (ctr("PGRequest", ctr("PGZero")), ctr("Native"),
+                        ctr("PGRequest", ctr("PGZero"), ctr("PGTrace"), ctr("PGEndBytes"), ctr("PGNoHeaders"), ctr("PGEndBytes"))):
+            with self.subTest(request=request), self.assertRaises(ContractError):
+                encode_frame(ctr("PGHttp", request, {"$": "Lam"}))
+        good = {"endpoint": 0, "method": "GET", "url_base64": "", "headers": [], "body_base64": ""}
+        for http in ({**good, "endpoint": 16}, {**good, "endpoint": True}, {**good, "method": "TRACE"},
+                     {**good, "callback": "x"}, {**good, "headers": [{"name_base64": "AB=="}]}):
+            with self.subTest(http=http), self.assertRaises(ContractError):
+                decode_step({"schema": 1, "writes": [], "http": http}, ())
+
+    def test_recorded_responses_build_closed_values(self):
+        script = ("import {runtimeResponseTerm} from " + json.dumps(CODEC)
+                  + "; const Ctr=(k,x)=>({$:'Ctr',k,x});"
+                    "const t=runtimeResponseTerm({Ctr},{status:204,body_base64:'AP8='});"
+                    "const f=runtimeResponseTerm({Ctr},{failure:'timeout'});"
+                    "if(t.x[0].x.map(d=>d.k).join()!=='PGHex2,PGHex0,PGHex4'||f.x[0].k!=='PGHttpTimeout')throw Error('shape');"
+                    "for(const v of [null,[],{},{failure:'toString'},{failure:'x'},{status:99,body_base64:''},"
+                    "{status:200},{status:'200',body_base64:''},{status:200,body_base64:'AB=='},"
+                    "{status:200,body_base64:'',extra:1}]) {"
+                    "let rejected=false;try{runtimeResponseTerm({Ctr},v)}catch{rejected=true}"
+                    "if(!rejected)throw Error('malformed response accepted');}")
         result = subprocess.run(["/usr/bin/node", "--input-type=module", "-e", script],
                                 capture_output=True, text=True, timeout=10, env={"PATH": "/usr/bin:/bin"})
         self.assertEqual(result.returncode, 0, result.stderr)

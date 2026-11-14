@@ -18,7 +18,7 @@ from bendspec.model import ContractError, canonical, text
 from .admission import AdmissionRejected
 from .audit import durable_directory, overlaps, publish, sync_directory
 from .encoding import commitment
-from .gateway import EffectUncertain, ExecutionRefused, Gateway, GatewayError
+from .gateway import EffectUncertain, ExecutionRefused, ExecutionStopped, Gateway, GatewayError
 
 MAX_PROGRAM = 16384
 MAX_OUTBOX_ENTRIES = 128
@@ -28,6 +28,7 @@ PROPOSAL_ID = re.compile(r"[0-9a-f]{32}")
 class Status(str, Enum):
     COMPLETED = "completed"
     REJECTED = "rejected"
+    STOPPED = "stopped"
     UNCERTAIN = "uncertain"
 
 
@@ -101,7 +102,7 @@ class OutboxWorker:
                 raise ContractError("outbox and results must be absolute owner-selected paths")
         self.outbox, self.results = outbox.resolve(), results.resolve()
         code = Path(__file__).resolve().parents[1]
-        protected = (gateway.authority, code, *gateway.session.destinations,
+        protected = (gateway.authority, code, *gateway.session.get_protected_paths(),
                      gateway.admission.toolchain.source.resolve(),
                      gateway.admission.toolchain.kernel.resolve())
         if overlaps(self.outbox, self.results) or any(overlaps(self.outbox, path) for path in protected):
@@ -150,6 +151,8 @@ class OutboxWorker:
                                         diagnostics=exc.feedback or "Program rejected by gateway verification.")
             except ExecutionRefused:
                 result = ProposalResult(1, proposal, Status.REJECTED, "execution_refused", source_id=source_id)
+            except ExecutionStopped:
+                result = ProposalResult(1, proposal, Status.STOPPED, "stopped_after_effects", source_id=source_id)
             except EffectUncertain as exc:
                 result = ProposalResult(1, proposal, Status.UNCERTAIN, "owner_reconciliation_required",
                                         source_id=source_id, archive_durable=exc.archive_durable)

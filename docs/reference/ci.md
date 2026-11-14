@@ -16,9 +16,9 @@ manual dispatch, on GitHub-hosted Ubuntu 24.04.
    is added to the workflow.
 
 A run fails on any failed, skipped or missing test, an empty suite, or a source or
-toolchain change between steps. The foundation and plugin suites have 30-minute
-deadlines and the pi suites 15 minutes. Logs and the
-reports in `artifacts/review-stack/` are uploaded as an artifact for 14 days.
+toolchain change between steps. The foundation suite has a 60-minute deadline, plugin
+suites 30 minutes and the pi suites 15 minutes. Logs and the reports in
+`artifacts/review-stack/` are uploaded as an artifact for 14 days.
 
 The job has read-only repository access, uses no secrets and pins every action by
 commit. To give `bwrap` user namespaces, it sets

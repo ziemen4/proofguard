@@ -20,7 +20,7 @@ from bendspec.backend import Toolchain
 from qualification import TestProfile, plugin_fingerprints, run_suite
 
 
-def stream_suite(command, cwd, environment, timeout=1800):
+def stream_suite(command, cwd, environment, timeout=3600):
     """Stream and retain output while bounding the complete process group."""
     chunks = []
     decoder = codecs.getincrementaldecoder("utf-8")()
@@ -67,7 +67,7 @@ def get_source_hashes():
                       "bend-spec/bendspec", "bend-spec/backend", "bend-spec/tests"):
         paths.extend(path for path in (ROOT / directory).rglob("*")
                      if path.suffix in (".py", ".mjs", ".bend", ".json"))
-    for relative in ("scripts/review-tests.py", "scripts/qualification.py",
+    for relative in ("tests/loopback.py", "scripts/review-tests.py", "scripts/qualification.py",
                      "bend-spec/scripts/setup-toolchain.py", "bend-spec/toolchain.lock.json"):
         path = ROOT / relative
         if path.is_file():

@@ -30,7 +30,7 @@ class AuthorSandbox:
         """Mount public runtime/task trees; keep the entire owner authority outside."""
         self.worker = worker
         protected = (worker.gateway.authority, worker.outbox, worker.results,
-                     *worker.gateway.session.destinations)
+                     *worker.gateway.session.get_protected_paths())
         if any(overlaps(Path("/usr"), path) for path in protected):
             raise ContractError("protected sandbox paths overlap the fixed /usr mount")
         self.runtime, self.task = public_tree(runtime), public_tree(task)

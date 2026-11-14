@@ -12,7 +12,11 @@
   "session": {
     "identifier": "reports",
     "expires": 2000000000,
-    "destinations": ["/absolute/public.txt", "/absolute/private.txt"]
+    "destinations": ["/absolute/public.txt", "/absolute/private.txt"],
+    "endpoints": [
+      {"origin": "https://api.example.com", "path_prefix": "/v1/", "methods": ["GET", "POST"],
+       "credential": {"header": "Authorization", "file": "/absolute/api-token"}}
+    ]
   }
 }
 ```
@@ -34,8 +38,23 @@ A plugin with bindings and a guard that takes owner data is selected like this:
 | `session.identifier` | Names the session's state and audit directory. Enrollments that reuse it share proposal claims and audit. |
 | `session.expires` | Unix time in seconds. Checked before execution and before each write. |
 | `session.destinations` | Absolute file paths; programs write to them by index. Parent directories must exist. |
+| `session.endpoints` | Optional HTTP endpoints; programs call them by index. See [HTTP endpoints](#http-endpoints). |
 
 Enrollment prints `{"schema": 1, "enrollment_id": "…", "contract_id": "…"}`.
+
+## HTTP endpoints
+
+| Field | Meaning |
+| --- | --- |
+| `origin` | `http` or `https`, host and optional port. A call's URL must have exactly this origin. |
+| `path_prefix` | The URL path must start with it. Paths with `.` or `..` segments, encoded `/`, `\` or `%`, or control bytes are refused. |
+| `methods` | Any of `GET`, `POST`, `PUT`, `PATCH`, `DELETE`. |
+| `credential` | Optional `{header, file}`. At each call the gateway reads the file and adds its contents as that header. The file stays outside every sandbox mount. |
+| `private_network` | Optional, default `false`. `true` allows loopback and private addresses, for local services. |
+
+Endpoints must be distinct and are part of the enrollment, so changing one needs a
+new enrollment. The credential file's contents are not: the owner can replace them,
+for example to rotate a short-lived token, without enrolling again.
 
 ## Plugin manifest
 

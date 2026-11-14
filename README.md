@@ -3,8 +3,8 @@
 ProofGuard separates planning from execution for AI agents. The agent plans by
 writing a Bend2 program; it never acts directly. The owner's side checks that program
 against the owner's rules, written as Bend laws, and only then executes it with data
-and authority the agent never holds. Effects go through a fixed interface; today it
-supports writing enrolled files.
+and authority the agent never holds. Effects go through a fixed interface: writing enrolled
+files and calling enrolled HTTP endpoints.
 
 - **Foundation** (`proofguard/`, `bend-spec/`): the planning/execution split.
   Sandbox, outbox worker, Bend and BendTT verification, execution, effects and audit.

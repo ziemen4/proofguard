@@ -73,8 +73,28 @@ like any other code they run.
 ## 4. Optional guard runner
 
 Set `"entrypoint"` to a Bend function that takes `inputs` (and `owner` if the
-selection has `owner_data`), calls `main(inputs)`, inspects the batch and returns
-it unchanged or returns `PGAbort{}`. Use it for checks on concrete bytes.
+selection has `owner_data`), calls `main(inputs)`, inspects the effects and returns
+them, or ends them with `PGAbort{}`. Use it for checks on concrete bytes.
+
+A `PGIO` value can be used only once, so a runner cannot inspect it and then return
+the original. It rebuilds the effects as it checks them:
+
+```bend
+def guard_writes(io: PGIO) -> PGIO:
+  match io:
+    case PGDone{}:
+      PGDone{}
+    case PGAbort{}:
+      PGAbort{}
+    case PGWrite{destination, bytes, next}:
+      PGWrite{destination, bytes, guard_writes(next)}  # check bytes here
+    case other:
+      PGAbort{}
+```
+
+`PGAbort{}` cancels every write since the last call, including those rebuilt
+before it. Keep the `case other` line: it refuses effects the runner does not handle, such as
+`PGHttp` or any effect added to the foundation later.
 
 ## 5. Enroll
 

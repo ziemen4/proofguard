@@ -18,6 +18,7 @@ from .audit import Audit, durable_directory, publish
 from .context import ExecutionContext, decode_owner_data, decode_snapshot
 from .encoding import commitment, encode
 from .gateway import Gateway, Session
+from .http import parse_endpoints
 
 LIBRARY = Path(__file__).parent / "stdlib"
 LIBRARY_PATH = "proofguard/effects.bend"
@@ -51,7 +52,8 @@ def decode_inputs(value: object) -> tuple[bytes, ...]:
 
 def parse_session(value: object) -> Session:
     """Resolve the owner's fixed destination table and session deadline."""
-    row = fields(value, {"identifier", "expires", "destinations"}, "owner session")
+    optional = {"endpoints"} & set(value) if type(value) is dict else set()
+    row = fields(value, {"identifier", "expires", "destinations"} | optional, "owner session")
     identifier = text(row["identifier"], "session identifier")
     if type(row["expires"]) is not int or not 0 <= row["expires"] < 2**63:
         raise ContractError("expiry must be a positive i64 epoch")
@@ -65,7 +67,7 @@ def parse_session(value: object) -> Session:
         destinations.append(path.parent.resolve(strict=True) / path.name)
     if len(set(destinations)) != len(destinations):
         raise ContractError("write destinations must identify distinct resources")
-    return Session(identifier, row["expires"], "", tuple(destinations))
+    return Session(identifier, row["expires"], "", tuple(destinations), parse_endpoints(row.get("endpoints", [])))
 
 
 @dataclass(frozen=True)
@@ -125,6 +127,8 @@ class Enrollment:
             "session": {"identifier": session.identifier, "expires": session.expires,
                         "destinations": [str(path) for path in session.destinations]},
         }
+        if session.endpoints:
+            record["session"]["endpoints"] = [endpoint.data() for endpoint in session.endpoints]
         record["plugins"] = [{"contract_id": package.identity, "entrypoint": selected["entrypoint"],
                               **{key: selected[key] for key in ("checker", "owner_data") if key in selected}}
                              for package, selected in captured]
@@ -176,7 +180,7 @@ class Enrollment:
         owners = [decode_owner_data(plugin["owner_data"]) if "owner_data" in plugin else None for plugin in row["plugins"]]
         context = ExecutionContext(inputs, tuple(owner for owner, plugin in zip(owners, row["plugins"])
                                                  if "owner_data" in plugin))
-        session = Session(parsed.identifier, parsed.expires, row["context_id"], parsed.destinations)
+        session = Session(parsed.identifier, parsed.expires, row["context_id"], parsed.destinations, parsed.endpoints)
         task_root = authority / "sessions" / commitment("session", session.identifier.encode())
         state, audit = task_root / "state", task_root / "audit"
         durable_directory(state)
@@ -202,4 +206,8 @@ class Enrollment:
                                 "main uses inputs once; pass them to a helper declared with +inputs to read several. "
                                 "pg_flatten(bytes) gives a PGFlat with no PGChunks, for recursing byte by byte; pg_unflatten turns it back into PGBytes. "
                                 "The program computes application behavior; the owner dispatches only fixed primitive IO. "
-                                "The gateway checks the program before executing its controlled IO."}
+                                "The gateway checks the program before executing its controlled IO. "
+                                "PGHttp{request, response => ...} calls an owner-enrolled endpoint while the program "
+                                "runs and gives the response to the program. You read only your submission's status, "
+                                "never a response. Effects run in program order and a sent call cannot be undone: "
+                                "PGAbort cancels only the writes since the last call."}

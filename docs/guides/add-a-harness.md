@@ -55,7 +55,7 @@ inside the sandbox.
 3. Wait for `/results/<id>.json` and give its `status`, `reason` and
    `diagnostics` back to the model.
 
-A rejected or completed proposal can be followed by a corrected one under a new ID.
+A rejected, stopped or completed proposal can be followed by a corrected one under a new ID.
 Stop if a result is `uncertain`: the owner has to reconcile the files first.
 
 ## Model access
