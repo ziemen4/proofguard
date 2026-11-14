@@ -2,7 +2,7 @@
 // This process never loads project imports or parses argument declarations.
 import fs from 'node:fs';
 import { pathToFileURL } from 'node:url';
-import { encodePrimitiveIO, runtimeInputTerm, runtimeOwnerTerm, runtimeResponseTerm } from './io.mjs';
+import { encodePrimitiveIO, runtimeExitTerm, runtimeInputTerm, runtimeOwnerTerm, runtimeResponseTerm } from './io.mjs';
 
 const B = await import(pathToFileURL(`${process.argv[2]}/bend.ts`));
 const { inputs, call } = JSON.parse(fs.readFileSync(0, 'utf8'));
@@ -55,11 +55,12 @@ try {
     expression, B.Lone(), B.ctx_nil(), 0);
   if (book.hols !== 0) throw new Error('Incomplete application');
   // Reduce only the head of PGIO: a continuation stays closed until the host
-  // supplies its response, so a pending call never runs the code after it.
+  // supplies its result, so a pending call or command never runs the code after it.
   const reduce = { head: term => B.term_wnf(book, term), full: term => B.term_snf(book, term),
-    resume: (next, response) => B.App(next, runtimeResponseTerm(B, response)) };
+    resume: (next, result, kind) => B.App(next, kind === 'run'
+      ? runtimeExitTerm(B, result) : runtimeResponseTerm(B, result)) };
   const responses = call.responses ?? [];
-  if (!Array.isArray(responses) || responses.length > 16) throw new Error('Invalid recorded responses');
+  if (!Array.isArray(responses) || responses.length > 16) throw new Error('Invalid recorded results');
   process.stdout.write(JSON.stringify({schema: 1, status: 'evaluated',
     value: encodePrimitiveIO(checked.tm, reduce, responses)}) + '\n');
 } catch (error) {

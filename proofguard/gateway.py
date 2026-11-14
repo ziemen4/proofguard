@@ -1,4 +1,4 @@
-"""Generic effect gateway for local writes and HTTP; no application-specific flow rules.
+"""Generic effect gateway for local writes, HTTP and commands; no application-specific flow rules.
 
 Prototype assumptions: the host and pinned Bend interpreter are trusted, and
 the agent cannot write the gateway's code, state, destinations or configuration.
@@ -18,7 +18,8 @@ from bendspec.model import canonical, decode
 from .admission import AdmissionRejected, ProgramAdmission, VerifiedProgram
 from .audit import Audit, durable_directory, sync_directory
 from .context import ExecutionContext
-from .effects import EffectDenied, Exchange, HttpRequest, HttpResponse, Step, Write
+from .commands import AuthorizedRun, Command, CommandRunner, Finish
+from .effects import CommandRun, EffectDenied, Exchange, HttpRequest, HttpResponse, RunExit, Step, Write
 from .encoding import commitment
 from .http import MAX_CALLS, AuthorizedCall, Delivery, Endpoint, HttpTransport
 
@@ -36,7 +37,7 @@ class ExecutionRefused(GatewayError):
 
 
 # Where an effect sits in a run: (step, effect), both from 1. A step's effects
-# are its writes in program order, then its call.
+# are its writes in program order, then its call or command.
 Position = tuple[int, int]
 
 
@@ -48,10 +49,11 @@ class ExecutionStopped(GatewayError):
     """
 
     def __init__(self, intent_id: str, request_id: str | None, completed: tuple[tuple[int, str], ...],
-                 calls: tuple[tuple[int, str, str], ...], stopped_at: Position):
+                 calls: tuple[tuple[int, str, str], ...], stopped_at: Position,
+                 commands: tuple[tuple[int, str, str], ...] = ()):
         super().__init__("execution stopped after completed effects")
         self.intent_id, self.request_id = intent_id, request_id
-        self.completed, self.calls = completed, calls
+        self.completed, self.calls, self.commands = completed, calls, commands
         self.stopped_at = stopped_at
 
 
@@ -64,12 +66,13 @@ class EffectUncertain(GatewayError):
 
     def __init__(self, intent_id: str, request_id: str | None,
                  completed: tuple[tuple[int, str], ...], archive_durable: bool,
-                 calls: tuple[tuple[int, str, str], ...] = (), in_doubt: tuple[Position, ...] = ()):
+                 calls: tuple[tuple[int, str, str], ...] = (), in_doubt: tuple[Position, ...] = (),
+                 commands: tuple[tuple[int, str, str], ...] = ()):
         super().__init__("execution failed; owner reconciliation may be required")
         self.request_id, self.completed = request_id, completed
         self.intent_id = intent_id
         self.archive_durable = archive_durable
-        self.calls = calls
+        self.calls, self.commands = calls, commands
         self.in_doubt = in_doubt
 
 
@@ -80,11 +83,16 @@ class Session:
     context_id: str
     destinations: tuple[Path, ...]
     endpoints: tuple[Endpoint, ...] = ()
+    commands: tuple[Command, ...] = ()
 
     def get_protected_paths(self) -> tuple[Path, ...]:
-        """List host paths an agent-writable mount must never reach."""
+        """List host paths the agent must neither see nor write."""
         return (*self.destinations,
                 *(endpoint.credential.file for endpoint in self.endpoints if endpoint.credential is not None))
+
+    def get_programs(self) -> tuple[Path, ...]:
+        """List the enrolled programs: the agent may see them but never write them."""
+        return tuple(path for command in self.commands for path in (command.program, command.program.resolve()))
 
 
 @dataclass(frozen=True)
@@ -98,6 +106,7 @@ class WriteReceipt:
     check_id: str
     intent_id: str
     calls: tuple[tuple[int, str, str], ...] = ()
+    commands: tuple[tuple[int, str, str], ...] = ()
 
 
 @dataclass(frozen=True)
@@ -112,14 +121,15 @@ class Prepared:
 class Run:
     """The effects of one execution in dispatch order.
 
-    history is the only copy of the responses. Each later step replays it, so a
-    call that already happened is never sent a second time.
+    history is the only copy of the results. Each later step replays it, so a
+    call or command that already happened is never performed a second time.
     """
 
     request_id: str | None = None
     history: list[Exchange] = field(default_factory=list)
     completed: list[tuple[int, str]] = field(default_factory=list)
     calls: list[tuple[int, str, str]] = field(default_factory=list)
+    commands: list[tuple[int, str, str]] = field(default_factory=list)
     writes: int = 0
     dispatched: bool = False
     # True from the moment an effect may have begun until its outcome is
@@ -150,9 +160,19 @@ def commit_request(request: HttpRequest) -> str:
                       request.url, bytes.fromhex(commitment("http-headers", *headers)), request.body)
 
 
+def commit_run(run: CommandRun) -> str:
+    """Bind the template index and every argument the program chose."""
+    return commitment("command-run", struct.pack(">Q", run.command), *run.args)
+
+
 def get_outcome(delivery: Delivery) -> str:
     """Name a finished call for audit: its status code or its failure."""
     return str(delivery.result.status) if isinstance(delivery.result, HttpResponse) else delivery.result.value
+
+
+def get_exit(finish: Finish) -> str:
+    """Name a finished command for audit: its exit status or its failure."""
+    return f"exit {finish.result.code}" if isinstance(finish.result, RunExit) else finish.result.value
 
 
 class Gateway:
@@ -167,6 +187,7 @@ class Gateway:
         self.context = context
         self.audit = audit
         self.transport = HttpTransport()
+        self.runner = CommandRunner()
         self.authority = authority.resolve(strict=True)
         if not isinstance(context, ExecutionContext) or context.identity != session.context_id:
             raise GatewayError("owner input snapshot does not match enrolled context")
@@ -208,14 +229,19 @@ class Gateway:
                                 session.context_id.encode(), self.admission.contract.identity.encode(),
                                 source_id.encode(), self.admission.entrypoint.encode(), check_id.encode(),
                                 bytes.fromhex(commitment("destinations", *(str(p).encode() for p in session.destinations))),
-                                *(canonical(endpoint.data()) for endpoint in session.endpoints))
+                                *(canonical(endpoint.data()) for endpoint in session.endpoints),
+                                # Absent without commands, so earlier intents keep their identity.
+                                *((bytes.fromhex(commitment("commands", *(canonical(command.data())
+                                                                          for command in session.commands))),)
+                                  if session.commands else ()))
         return Prepared(intent_id, source_id, check_id, program)
 
     def check(self, source: str) -> Prepared:
         """Preview only. A later submit rechecks its own captured source."""
         return self._prepare(source)
 
-    def _authorize_step(self, writes: tuple[Write, ...], step: Step | None, run: Run) -> AuthorizedCall | None:
+    def _authorize_step(self, writes: tuple[Write, ...], step: Step | None, run: Run,
+                        remaining: float) -> AuthorizedCall | AuthorizedRun | None:
         """Check one whole step, so a denied effect stops it before its first write."""
         session = self.session
         for write in writes:
@@ -225,11 +251,16 @@ class Gateway:
             raise EffectDenied("execution exceeds its write limit")
         if step is None:
             return None
+        # Calls and commands share one limit: each one adds a replay of the program.
         if len(run.history) >= MAX_CALLS:
             raise EffectDenied("execution exceeds its call limit")
-        if step.request.endpoint >= len(session.endpoints):
+        if isinstance(step.action, CommandRun):
+            if step.action.command >= len(session.commands):
+                raise EffectDenied("command is not enrolled")
+            return session.commands[step.action.command].authorize(step.action, remaining)
+        if step.action.endpoint >= len(session.endpoints):
             raise EffectDenied("HTTP endpoint is not enrolled")
-        return session.endpoints[step.request.endpoint].authorize(step.request)
+        return session.endpoints[step.action.endpoint].authorize(step.action)
 
     def _archive_step(self, writes: tuple[Write, ...], step: Step | None, run: Run, prepared: Prepared) -> None:
         """Archive the step's intent and concrete actions BEFORE external IO."""
@@ -238,11 +269,15 @@ class Gateway:
         record = {"schema": 1, "kind": "prepared_effects", "session": self.session.identifier,
                   "intent_id": prepared.intent_id, "check_id": prepared.check_id,
                   "actions": [(w.capability, commitment("payload", w.data)) for w in writes]}
-        if step is not None:
-            request = commit_request(step.request)
+        if step is not None and isinstance(step.action, CommandRun):
+            command = commit_run(step.action)
+            action_fields += (b"run" + bytes.fromhex(command),)
+            record["run"] = {"sequence": len(run.history), "command": step.action.command, "arguments": command}
+        elif step is not None:
+            request = commit_request(step.action)
             action_fields += (b"http" + bytes.fromhex(request),)
-            record["call"] = {"sequence": len(run.history), "endpoint": step.request.endpoint,
-                              "method": step.request.method.value, "request": request}
+            record["call"] = {"sequence": len(run.history), "endpoint": step.action.endpoint,
+                              "method": step.action.method.value, "request": request}
         actions = bytes.fromhex(commitment("actions", *action_fields))
         # A run without calls has one step, whose identity covers its whole batch.
         run.request_id = (commitment("request-v1", bytes.fromhex(prepared.intent_id), actions)
@@ -279,34 +314,61 @@ class Gateway:
         if time.time() >= self.session.expires:
             raise GatewayError("session expired before effect")
         sequence = len(run.history)
-        request = commit_request(step.request)
+        request = commit_request(step.action)
         # A crash leaves this record without a finish: delivery is then unknown,
         # and the worker's durable claim prevents any repeat of the proposal.
         self.audit.store({"schema": 1, "kind": "http_started", "session": self.session.identifier,
                           "intent_id": prepared.intent_id, "request_id": run.request_id, "sequence": sequence,
-                          "endpoint": step.request.endpoint, "request": request})
+                          "endpoint": step.action.endpoint, "request": request})
         wrote = run.dispatched
         run.dispatched = run.in_flight = True
         delivery = self.transport.send(call)
         response = delivery.result if isinstance(delivery.result, HttpResponse) else None
         self.audit.store({"schema": 1, "kind": "http_finished", "session": self.session.identifier,
                           "intent_id": prepared.intent_id, "request_id": run.request_id, "sequence": sequence,
-                          "endpoint": step.request.endpoint, "request": request, "outcome": get_outcome(delivery),
+                          "endpoint": step.action.endpoint, "request": request, "outcome": get_outcome(delivery),
                           "sent": delivery.sent, "ambiguous": delivery.ambiguous, "blocked": delivery.blocked,
                           "response": None if response is None else commitment("http-response", response.body),
                           "response_bytes": None if response is None else len(response.body)})
         run.history.append(Exchange(step, delivery.result))
-        run.calls.append((step.request.endpoint, request, get_outcome(delivery)))
+        run.calls.append((step.action.endpoint, request, get_outcome(delivery)))
         # A call that never left the host is no effect to reconcile.
         run.dispatched = wrote or delivery.sent
         run.finish_effect(delivery.ambiguous)
 
+    def _dispatch_run(self, step: Step, command: AuthorizedRun, run: Run, prepared: Prepared) -> None:
+        """Run one command under a durable record; its output stays in this run."""
+        if time.time() >= self.session.expires:
+            raise GatewayError("session expired before effect")
+        sequence = len(run.history)
+        arguments = commit_run(step.action)
+        record = {"schema": 1, "session": self.session.identifier, "intent_id": prepared.intent_id,
+                  "request_id": run.request_id, "sequence": sequence, "command": step.action.command,
+                  "arguments": arguments}
+        # As with a call, a crash leaves this record without a finish, and the
+        # worker's durable claim prevents any repeat of the proposal.
+        self.audit.store({**record, "kind": "run_started"})
+        wrote = run.dispatched
+        run.dispatched = run.in_flight = True
+        finish = self.runner.run(command)
+        output = finish.result.output if isinstance(finish.result, RunExit) else None
+        self.audit.store({**record, "kind": "run_finished", "outcome": get_exit(finish), "started": finish.started,
+                          "ambiguous": finish.ambiguous,
+                          "output": None if output is None else commitment("command-output", output),
+                          "output_bytes": None if output is None else len(output)})
+        run.history.append(Exchange(step, finish.result))
+        run.commands.append((step.action.command, arguments, get_exit(finish)))
+        # A command that never started is no effect to reconcile.
+        run.dispatched = wrote or finish.started
+        run.finish_effect(finish.ambiguous)
+
     def _execute(self, prepared: Prepared, run: Run) -> None:
         """Evaluate until an effect, dispatch it, and resume until the program ends.
 
-        Each step's writes dispatch before its call, in program order. A program
-        without PGHttp is a single step, so it dispatches nothing until all of
-        it has been evaluated and every guard has accepted.
+        Each step's writes dispatch before its call or command, in program
+        order. A program without PGHttp or PGRun is a single step, so it
+        dispatches nothing until all of it has been evaluated and every guard
+        has accepted.
         """
         deadline = time.monotonic() + RUN_SECONDS
         while True:
@@ -318,14 +380,17 @@ class Gateway:
                                                     context=self.context, history=tuple(run.history))
             step = result if isinstance(result, Step) else None
             writes = result if step is None else step.writes
-            call = self._authorize_step(writes, step, run)
+            action = self._authorize_step(writes, step, run, deadline - time.monotonic())
             self._archive_step(writes, step, run, prepared)
             for write in writes:
                 self._replace_file(write, run)
             run.writes += len(writes)
             if step is None:
                 return
-            self._dispatch_call(step, call, run, prepared)
+            if isinstance(action, AuthorizedRun):
+                self._dispatch_run(step, action, run, prepared)
+            else:
+                self._dispatch_call(step, action, run, prepared)
 
     def submit(self, source: str, *, proposal: str | None = None) -> WriteReceipt:
         """Verify every submission, archive its attempt, then execute its effects."""
@@ -342,10 +407,10 @@ class Gateway:
                 raise GatewayError("session expired before application execution")
             self._execute(prepared, run)
             if run.in_doubt:
-                raise GatewayError("a sent call may have reached its server")
+                raise GatewayError("a sent call or interrupted command may have had effects")
             receipt = WriteReceipt(run.request_id, session.identifier, self.admission.contract.identity,
                                    prepared.source_id, session.context_id, tuple(run.completed), prepared.check_id,
-                                   intent_id, tuple(run.calls))
+                                   intent_id, tuple(run.calls), tuple(run.commands))
             self.audit.store({"schema": 1, "kind": "completed", "receipt": asdict(receipt)})
             return receipt
         except (OSError, GatewayError, ValueError) as exc:
@@ -361,13 +426,13 @@ class Gateway:
                                   "kind": "stopped" if stopped else "uncertain" if run.dispatched else "refused",
                                   "session": session.identifier, "check_id": prepared.check_id,
                                   "proposal": proposal, "completed": run.completed, "calls": run.calls,
-                                  **position})
+                                  "commands": run.commands, **position})
             except (OSError, ValueError):
                 archive_durable = False
             if not run.dispatched:
                 raise ExecutionRefused("execution stopped before any effect") from exc
             if stopped and archive_durable:
                 raise ExecutionStopped(intent_id, run.request_id, tuple(run.completed), tuple(run.calls),
-                                       run.next_effect) from exc
+                                       run.next_effect, tuple(run.commands)) from exc
             raise EffectUncertain(intent_id, run.request_id, tuple(run.completed), archive_durable,
-                                  tuple(run.calls), in_doubt) from exc
+                                  tuple(run.calls), in_doubt, tuple(run.commands)) from exc

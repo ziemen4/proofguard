@@ -105,12 +105,30 @@ type PGResponse is Data:
   PGResponse{status: PGStatus, body: PGBytes}
   PGHttpFailed{failure: PGHttpFailure}
 
-# PGHttp holds a function, so PGIO is linear: a value of this type is used once.
+# One byte string per slot of an owner-enrolled command template, in slot order.
+type PGArgs is Data:
+  PGNoArgs{}
+  PGArg{value: PGBytes, rest: PGArgs}
+
+type PGRunFailure is Data:
+  PGRunUnstarted{}
+  PGRunTimeout{}
+  PGRunSignalled{}
+  PGRunOversized{}
+
+# A finished command: its exit status as two hexadecimal digits and its combined
+# standard output and error.
+type PGExit is Data:
+  PGExited{high: PGNibble, low: PGNibble, output: PGBytes}
+  PGRunFailed{failure: PGRunFailure}
+
+# PGHttp and PGRun hold functions, so PGIO is linear: a value of this type is used once.
 type PGIO is Type:
   PGDone{}
   PGAbort{}
   PGWrite{destination: PGIndex, bytes: PGBytes, next: PGIO}
   PGHttp{request: PGRequest, next: PGResponse -> PGIO}
+  PGRun{command: PGIndex, args: PGArgs, next: PGExit -> PGIO}
 
 def pg_append(left: PGBytes, right: PGBytes) -> PGBytes:
   match left:
@@ -186,6 +204,22 @@ def pg_http_ok(response: PGResponse) -> Bool:
       pg_status_ok(status)
     case PGHttpFailed{failure}:
       False{}
+
+def pg_run_ok(result: PGExit) -> Bool:
+  match result:
+    case PGExited{PGHex0{}, PGHex0{}, output}:
+      True{}
+    case PGExited{high, low, output}:
+      False{}
+    case PGRunFailed{failure}:
+      False{}
+
+def pg_run_output(result: PGExit) -> PGBytes:
+  match result:
+    case PGExited{high, low, output}:
+      output
+    case PGRunFailed{failure}:
+      PGEndBytes{}
 
 # Agent text: pg_text("...") encodes a Bend string as UTF-8 bytes.
 def pg_nibble(a: Bool, b: Bool, c: Bool, d: Bool) -> PGNibble:

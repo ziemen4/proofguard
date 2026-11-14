@@ -1,0 +1,9 @@
+{
+  "schema": 1,
+  "name": "run-test-fixture",
+  "intent": "Leave every program to the foundation's own command boundary",
+  "sources": ["open.bend"],
+  "bindings": [],
+  "laws": ["open_to_foundation"],
+  "entrypoint": "main"
+}

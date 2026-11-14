@@ -18,6 +18,7 @@ from .audit import Audit, durable_directory, publish
 from .context import ExecutionContext, decode_owner_data, decode_snapshot
 from .encoding import commitment, encode
 from .gateway import Gateway, Session
+from .commands import parse_commands
 from .http import parse_endpoints
 
 LIBRARY = Path(__file__).parent / "stdlib"
@@ -52,7 +53,7 @@ def decode_inputs(value: object) -> tuple[bytes, ...]:
 
 def parse_session(value: object) -> Session:
     """Resolve the owner's fixed destination table and session deadline."""
-    optional = {"endpoints"} & set(value) if type(value) is dict else set()
+    optional = {"endpoints", "commands"} & set(value) if type(value) is dict else set()
     row = fields(value, {"identifier", "expires", "destinations"} | optional, "owner session")
     identifier = text(row["identifier"], "session identifier")
     if type(row["expires"]) is not int or not 0 <= row["expires"] < 2**63:
@@ -67,7 +68,9 @@ def parse_session(value: object) -> Session:
         destinations.append(path.parent.resolve(strict=True) / path.name)
     if len(set(destinations)) != len(destinations):
         raise ContractError("write destinations must identify distinct resources")
-    return Session(identifier, row["expires"], "", tuple(destinations), parse_endpoints(row.get("endpoints", [])))
+    destinations = tuple(destinations)
+    return Session(identifier, row["expires"], "", destinations, parse_endpoints(row.get("endpoints", [])),
+                   parse_commands(row.get("commands", []), destinations))
 
 
 @dataclass(frozen=True)
@@ -129,6 +132,8 @@ class Enrollment:
         }
         if session.endpoints:
             record["session"]["endpoints"] = [endpoint.data() for endpoint in session.endpoints]
+        if session.commands:
+            record["session"]["commands"] = [command.data() for command in session.commands]
         record["plugins"] = [{"contract_id": package.identity, "entrypoint": selected["entrypoint"],
                               **{key: selected[key] for key in ("checker", "owner_data") if key in selected}}
                              for package, selected in captured]
@@ -180,7 +185,8 @@ class Enrollment:
         owners = [decode_owner_data(plugin["owner_data"]) if "owner_data" in plugin else None for plugin in row["plugins"]]
         context = ExecutionContext(inputs, tuple(owner for owner, plugin in zip(owners, row["plugins"])
                                                  if "owner_data" in plugin))
-        session = Session(parsed.identifier, parsed.expires, row["context_id"], parsed.destinations, parsed.endpoints)
+        session = Session(parsed.identifier, parsed.expires, row["context_id"], parsed.destinations, parsed.endpoints,
+                          parsed.commands)
         task_root = authority / "sessions" / commitment("session", session.identifier.encode())
         state, audit = task_root / "state", task_root / "audit"
         durable_directory(state)
@@ -208,6 +214,9 @@ class Enrollment:
                                 "The program computes application behavior; the owner dispatches only fixed primitive IO. "
                                 "The gateway checks the program before executing its controlled IO. "
                                 "PGHttp{request, response => ...} calls an owner-enrolled endpoint while the program "
-                                "runs and gives the response to the program. You read only your submission's status, "
-                                "never a response. Effects run in program order and a sent call cannot be undone: "
-                                "PGAbort cancels only the writes since the last call."}
+                                "runs and gives the response to the program. "
+                                "PGRun{command, args, result => ...} runs an owner-enrolled command template with one "
+                                "argument per slot and gives its exit status and output to the program. "
+                                "You read only your submission's status, never a response or output. Effects run in "
+                                "program order and a call or command that happened cannot be undone: PGAbort cancels "
+                                "only the writes since the last call or command."}

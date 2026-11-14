@@ -7,7 +7,7 @@ import subprocess
 import unittest
 
 from bendspec.model import ContractError
-from proofguard.effects import HttpMethod, ProgramAborted, decode_step, decode_writes
+from proofguard.effects import CommandRun, HttpMethod, ProgramAborted, decode_step, decode_writes
 
 CODEC = (Path(__file__).resolve().parents[2] / "bend-spec/backend/io.mjs").as_uri()
 
@@ -129,7 +129,7 @@ class PrimitiveTests(unittest.TestCase):
                                  "http": {"endpoint": 1, "method": "POST", "url_base64": "YQ==", "body_base64": "",
                                           "headers": [{"name_base64": "", "value_base64": ""}]}})
         step = decode_step(frame, ())
-        self.assertEqual((len(step.writes), step.request.method, step.request.url), (1, HttpMethod.POST, b"a"))
+        self.assertEqual((len(step.writes), step.action.method, step.action.url), (1, HttpMethod.POST, b"a"))
 
     def test_malformed_requests_reject(self):
         for request in (ctr("PGRequest", ctr("PGZero")), ctr("Native"),
@@ -167,3 +167,53 @@ class PrimitiveTests(unittest.TestCase):
             with self.subTest(value_type=type(value)):
                 with self.assertRaises(ContractError):
                     decode_writes(value)
+
+
+class CommandCodecTests(unittest.TestCase):
+    def args(self, *values):
+        term = ctr("PGNoArgs")
+        for value in reversed(values):
+            data = ctr("PGEndBytes")
+            for byte in reversed(value):
+                data = ctr("PGByte", ctr("PGHex%X" % (byte >> 4)), ctr("PGHex%X" % (byte & 15)), data)
+            term = ctr("PGArg", data, term)
+        return term
+
+    def test_a_pending_command_ends_the_step_without_entering_its_continuation(self):
+        value = ctr("PGWrite", ctr("PGZero"), ctr("PGEndBytes"),
+                    ctr("PGRun", ctr("PGNext", ctr("PGZero")), self.args(b"a", b""), {"$": "Lam"}))
+        frame = encode_frame(value)
+        self.assertEqual(frame, {"schema": 1, "writes": [{"destination": 0, "bytes_base64": ""}],
+                                 "run": {"command": 1, "args_base64": ["YQ==", ""]}})
+        step = decode_step(frame, ())
+        self.assertEqual((len(step.writes), step.action), (1, CommandRun(1, (b"a", b""))))
+
+    def test_malformed_commands_reject(self):
+        for value in (ctr("PGRun", ctr("PGZero"), ctr("PGNoArgs")),
+                      ctr("PGRun", ctr("PGZero"), ctr("PGArg", ctr("PGEndBytes")), {"$": "Lam"}),
+                      ctr("PGRun", ctr("PGZero"), self.args(*[b"x"] * 17), {"$": "Lam"})):
+            with self.subTest(value=value), self.assertRaises(ContractError):
+                encode_frame(value)
+        good = {"command": 0, "args_base64": []}
+        http = {"endpoint": 0, "method": "GET", "url_base64": "", "headers": [], "body_base64": ""}
+        for frame in ({"run": {**good, "command": 16}}, {"run": {**good, "command": True}},
+                      {"run": {**good, "args_base64": ["AB=="]}}, {"run": {**good, "args_base64": [""] * 17}},
+                      {"run": {**good, "shell": "sh"}}, {"run": good, "http": http}):
+            with self.subTest(frame=frame), self.assertRaises(ContractError):
+                decode_step({"schema": 1, "writes": [], **frame}, ())
+
+    def test_recorded_command_results_build_closed_values(self):
+        script = ("import {runtimeExitTerm} from " + json.dumps(CODEC)
+                  + "; const Ctr=(k,x)=>({$:'Ctr',k,x});"
+                    "const t=runtimeExitTerm({Ctr},{exit:171,output_base64:'AP8='});"
+                    "const f=runtimeExitTerm({Ctr},{failure:'timeout'});"
+                    "if(t.k!=='PGExited'||t.x[0].k!=='PGHexA'||t.x[1].k!=='PGHexB'||f.x[0].k!=='PGRunTimeout')"
+                    "throw Error('shape');"
+                    "for(const v of [null,[],{},{failure:'toString'},{failure:'broken'},{exit:256,output_base64:''},"
+                    "{exit:-1,output_base64:''},{exit:1.5,output_base64:''},{exit:0},{exit:0,output_base64:'AB=='},"
+                    "{exit:0,output_base64:'',extra:1}]) {"
+                    "let rejected=false;try{runtimeExitTerm({Ctr},v)}catch{rejected=true}"
+                    "if(!rejected)throw Error('malformed result accepted');}")
+        result = subprocess.run(["/usr/bin/node", "--input-type=module", "-e", script],
+                                capture_output=True, text=True, timeout=10, env={"PATH": "/usr/bin:/bin"})
+        self.assertEqual(result.returncode, 0, result.stderr)

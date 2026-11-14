@@ -59,29 +59,58 @@ HttpResult = HttpResponse | HttpFailure
 
 
 @dataclass(frozen=True)
+class CommandRun:
+    """A template index and one argument per slot; unchecked until dispatch."""
+
+    command: int
+    args: tuple[bytes, ...]
+
+
+class RunFailure(Enum):
+    """Why a command produced no exit status; the program receives this value."""
+
+    UNSTARTED = "unstarted"
+    TIMEOUT = "timeout"
+    SIGNALLED = "signalled"
+    OVERSIZED = "oversized"
+
+
+@dataclass(frozen=True)
+class RunExit:
+    code: int
+    output: bytes
+
+
+RunResult = RunExit | RunFailure
+
+
+@dataclass(frozen=True)
 class Step:
-    """A pending call and the writes the program computed before it."""
+    """A pending call or command and the writes the program computed before it."""
 
     writes: tuple[Write, ...]
-    request: HttpRequest
+    action: HttpRequest | CommandRun
 
 
-# A finished program yields its last writes; one that reached a call yields a Step.
+# A finished program yields its last writes; one that reached a call or command
+# yields a Step.
 Evaluation = tuple[Write, ...] | Step
 
 
 @dataclass(frozen=True)
 class Exchange:
-    """One dispatched step and the response its call produced."""
+    """One dispatched step and the result its call or command produced."""
 
     step: Step
-    response: HttpResult
+    response: HttpResult | RunResult
 
 
-def encode_response(result: HttpResult) -> dict:
-    """Serialize a recorded result for the evaluator's closed response codec."""
-    if isinstance(result, HttpFailure):
+def encode_response(result: HttpResult | RunResult) -> dict:
+    """Serialize a recorded result for the evaluator's closed result codecs."""
+    if isinstance(result, (HttpFailure, RunFailure)):
         return {"failure": result.value}
+    if isinstance(result, RunExit):
+        return {"exit": result.code, "output_base64": base64.b64encode(result.output).decode()}
     return {"status": result.status, "body_base64": base64.b64encode(result.body).decode()}
 
 
@@ -114,6 +143,16 @@ def decode_request(value: object) -> HttpRequest:
                        decode_bytes(row["body_base64"]))
 
 
+def decode_run(value: object) -> CommandRun:
+    """Decode the command's shape; Command.authorize judges its arguments."""
+    row = fields(value, {"command", "args_base64"}, "primitive command")
+    if type(row["command"]) is not int or not 0 <= row["command"] < 16:
+        raise ContractError("primitive command index out of range")
+    if not isinstance(row["args_base64"], list) or len(row["args_base64"]) > 16:
+        raise ContractError("expected at most sixteen command arguments")
+    return CommandRun(row["command"], tuple(decode_bytes(item) for item in row["args_base64"]))
+
+
 def decode_writes(value: object) -> tuple[Write, ...]:
     """Validate the compact primitive frame before dispatching any IO."""
     if isinstance(value, dict) and set(value) == {"schema", "abort"}:
@@ -135,15 +174,17 @@ def decode_writes(value: object) -> tuple[Write, ...]:
 
 
 def decode_call(value: dict) -> Step:
-    """Decode a frame that ends at a call, using the write frame's own rules."""
-    return Step(decode_writes({key: item for key, item in value.items() if key != "http"}),
-                decode_request(value["http"]))
+    """Decode a frame that ends at a call or command, using the write frame's own rules."""
+    if ("http" in value) == ("run" in value):
+        raise ContractError("a step ends at exactly one call or command")
+    action = decode_request(value["http"]) if "http" in value else decode_run(value["run"])
+    return Step(decode_writes({key: item for key, item in value.items() if key not in ("http", "run")}), action)
 
 
 def decode_step(value: object, dispatched: tuple[Step, ...]) -> Evaluation:
     """Return what follows the dispatched steps, after requiring replay to reproduce them.
 
-    Each run restarts from main, so a replayed call was already sent. Bend is
+    Each run restarts from main, so a replayed call or command already happened. Bend is
     pure and the interpreter is pinned, so a difference here means the trusted
     evaluator misbehaved and nothing it computed afterward may be dispatched.
     """
@@ -151,8 +192,8 @@ def decode_step(value: object, dispatched: tuple[Step, ...]) -> Evaluation:
         raise ContractError("invalid primitive IO frame")
     frame = dict(value)
     completed = frame.pop("completed", [])
-    if not isinstance(completed, list) or any(not isinstance(item, dict) or "http" not in item for item in completed):
+    if not isinstance(completed, list) or any(not isinstance(item, dict) for item in completed):
         raise ContractError("invalid primitive replay")
     if tuple(decode_call(item) for item in completed) != dispatched:
         raise ContractError("replay differs from dispatched effects")
-    return decode_call(frame) if "http" in frame else decode_writes(frame)
+    return decode_call(frame) if "http" in frame or "run" in frame else decode_writes(frame)

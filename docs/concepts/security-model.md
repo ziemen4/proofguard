@@ -12,11 +12,14 @@
 - Programs call only the HTTP endpoints fixed at enrollment. The gateway checks
   each concrete URL, method and header before sending, adds owner credentials
   itself and connects only to addresses it has checked.
+- Programs run only the command templates fixed at enrollment, filling only their
+  slots. The gateway checks each argument, executes the program without a shell and
+  bounds its time and output.
 - Guard runners can veto a step but cannot change it.
 - Plugin rejections reach the agent as a generic status. Plugin sources, law names,
   inputs and owner data never enter the sandbox.
 - Every proposal that reaches verification is recorded in the owner's audit log,
-  with its source, check, execution attempt, planned writes, calls and outcome.
+  with its source, check, execution attempt, planned writes, calls, commands and outcome.
 - `tests/core/` runs these properties against real sandboxes, the real checker and
   real files, including hostile code inside the sandbox.
 
@@ -29,11 +32,15 @@ any plugin verifier: BendTT checks the laws over its facts, not the verifier's c
 
 ## Behavior to plan for
 
-- Each file write is atomic, but a run is not. If anything fails after the first
-  effect began, the result is `uncertain` and the owner checks the files and
-  endpoints.
+- Each file write is atomic, but a run is not. If something fails while an effect
+  is being performed, the result is `uncertain` and the owner checks the files,
+  endpoints and commands.
 - A sent call cannot be undone, and a timeout after sending is `uncertain`: the
   server may have acted on it.
+- A command runs with the worker's user and access. Enrollment refuses some
+  templates that plainly hand the agent arbitrary code, but it cannot know every
+  program; a template is as safe as the program and arguments it fixes. A command
+  that times out or leaves a process running is `uncertain`.
 - Labels and laws can keep data from reaching an endpoint, but a response is still
   data from that server. A public response from an untrusted server can steer what
   the program does within the laws.

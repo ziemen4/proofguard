@@ -1,6 +1,8 @@
 const METHODS = { PGGet: 'GET', PGPost: 'POST', PGPut: 'PUT', PGPatch: 'PATCH', PGDelete: 'DELETE' };
 const FAILURES = { unreachable: 'PGHttpUnreachable', timeout: 'PGHttpTimeout',
   broken: 'PGHttpBroken', oversized: 'PGHttpOversized' };
+const RUN_FAILURES = { unstarted: 'PGRunUnstarted', timeout: 'PGRunTimeout',
+  signalled: 'PGRunSignalled', oversized: 'PGRunOversized' };
 
 /** Construct closed typed input data; private bytes are never parsed as code. */
 function bytePacker(B) {
@@ -87,15 +89,34 @@ export function runtimeResponseTerm(B, response) {
   return B.Ctr('PGResponse', [B.Ctr('PGStatus', digits), bytePacker(B)(response.body_base64)]);
 }
 
+/** Build the PGExit a recorded command gives its continuation. */
+export function runtimeExitTerm(B, result) {
+  if (result === null || typeof result !== 'object' || Array.isArray(result)) {
+    throw new Error('Invalid recorded command result');
+  }
+  const keys = Object.keys(result).sort().join(',');
+  if (keys === 'failure') {
+    const name = RUN_FAILURES[result.failure];
+    if (typeof name !== 'string' || !Object.hasOwn(RUN_FAILURES, result.failure)) throw new Error('Invalid recorded failure');
+    return B.Ctr('PGRunFailed', [B.Ctr(name, [])]);
+  }
+  if (keys !== 'exit,output_base64' || !Number.isInteger(result.exit) || result.exit < 0 || result.exit > 255) {
+    throw new Error('Invalid recorded command result');
+  }
+  checkEncoding(result.output_base64, 65536);
+  const digit = value => B.Ctr('PGHex' + value.toString(16).toUpperCase(), []);
+  return B.Ctr('PGExited', [digit(result.exit >> 4), digit(result.exit & 15), bytePacker(B)(result.output_base64)]);
+}
+
 /** Leave closed terms as they are; the evaluator supplies Bend's own reduction. */
 const CLOSED = { head: term => term, full: term => term };
 
 /** Encode the fixed primitive IO ABI one effect step at a time.
- * Writes before a PGHttp form one step. The host dispatches a step before it
- * asks for the next, so only the current step can still be cancelled. Recorded
- * responses resume the program past calls it already made: every run restarts
- * from main and re-derives those requests, which the host compares and never
- * sends again. Continuations are entered only after their response exists.
+ * Writes before a PGHttp or PGRun form one step. The host dispatches a step
+ * before it asks for the next, so only the current step can still be cancelled.
+ * Recorded results resume the program past calls and commands it already made:
+ * every run restarts from main and re-derives them, which the host compares and
+ * never performs again. Continuations are entered only after their result exists.
  */
 export function encodePrimitiveIO(value, reduce = CLOSED, responses = []) {
   const ctr = term => {
@@ -156,6 +177,18 @@ export function encodePrimitiveIO(value, reduce = CLOSED, responses = []) {
     return { endpoint: index(args[0]), method: METHODS[method], url_base64: bytes(args[2]),
       headers: headers(args[3]), body_base64: bytes(args[4]) };
   };
+  const command = args => {
+    const values = [];
+    let rest = reduce.full(args[1]);
+    while (true) {
+      const [kind, fields] = ctr(rest);
+      if (kind === 'PGNoArgs' && fields.length === 0) break;
+      if (kind !== 'PGArg' || fields.length !== 2 || values.length === 16) throw new Error('Invalid or oversized arguments');
+      values.push(bytes(fields[0]));
+      rest = fields[1];
+    }
+    return { command: index(reduce.full(args[0])), args_base64: values };
+  };
   const completed = [];
   let writes = [];
   const frame = fields => ({ schema: 1, ...(completed.length ? { completed } : {}), ...fields });
@@ -168,7 +201,15 @@ export function encodePrimitiveIO(value, reduce = CLOSED, responses = []) {
       const http = request(reduce.full(args[0]));
       if (completed.length === responses.length) return frame({ writes, http });
       completed.push({ schema: 1, writes, http });
-      value = reduce.resume(args[1], responses[completed.length - 1]);
+      value = reduce.resume(args[1], responses[completed.length - 1], 'http');
+      writes = [];
+      continue;
+    }
+    if (name === 'PGRun' && args.length === 3) {
+      const run = command(args);
+      if (completed.length === responses.length) return frame({ writes, run });
+      completed.push({ schema: 1, writes, run });
+      value = reduce.resume(args[2], responses[completed.length - 1], 'run');
       writes = [];
       continue;
     }

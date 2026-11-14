@@ -26,7 +26,7 @@ The owner enrolls one to sixteen [plugins](plugins.md) together with:
 
 - `inputs_base64`: up to 16 private input snapshots the program will read;
 - `session`: an identifier, an expiry time, the absolute destination file paths
-  and, optionally, HTTP endpoints;
+  and, optionally, HTTP endpoints and command templates;
 - optional per-plugin `owner_data` and source `bindings`.
 
 Enrollment reads every plugin file once and stores the result, with the toolchain
@@ -49,9 +49,9 @@ instructions. Plugin sources, law names and input bytes stay with the owner.
 and the agent supplies its definition.
 
 `proofguard/stdlib/effects.bend` defines the types it works with. Inputs and
-destinations and endpoints are unary indexes (`PGZero{}`, `PGNext{PGZero{}}`, …).
-The result is a chain of effects: writing to an enrolled destination file, or
-calling an enrolled HTTP endpoint.
+destinations, endpoints and commands are unary indexes (`PGZero{}`, `PGNext{PGZero{}}`, …).
+The result is a chain of effects: writing to an enrolled destination file,
+calling an enrolled HTTP endpoint, or running an enrolled command.
 
 ```bend
 type PGIO is Type:
@@ -59,19 +59,21 @@ type PGIO is Type:
   PGAbort{}
   PGWrite{destination: PGIndex, bytes: PGBytes, next: PGIO}
   PGHttp{request: PGRequest, next: PGResponse -> PGIO}
+  PGRun{command: PGIndex, args: PGArgs, next: PGExit -> PGIO}
 ```
 
-`PGHttp`'s `next` is a function that receives the response, so the program, not the
-agent, decides what to do with it. Because `PGIO` holds a function, a `PGIO` value
+The `next` of `PGHttp` and `PGRun` is a function that receives the response or the
+command's result, so the program, not the agent, decides what to do with it. Because `PGIO` holds a function, a `PGIO` value
 can be used only once: it cannot be stored in a `Data` type or declared as a `+`
 argument.
 
 Helpers include `pg_input(index, inputs)`, `pg_write(destination, bytes)`,
 `pg_get(endpoint, url)`, `pg_post(endpoint, url, body)`, `pg_http_ok(response)`,
-`pg_http_body(response)`, `pg_text("…")`, `pg_append`, and `pg_flatten`/`pg_unflatten`
-for byte-by-byte recursion. The agent can add its own helpers and datatypes but
-cannot redefine anything the interface supplies. `PGAbort` cancels the writes
-computed since the last call; a call that was sent cannot be undone.
+`pg_http_body(response)`, `pg_run_ok(result)`, `pg_run_output(result)`, `pg_text("…")`,
+`pg_append`, and `pg_flatten`/`pg_unflatten` for byte-by-byte recursion. The agent can
+add its own helpers and datatypes but cannot redefine anything the interface
+supplies. `PGAbort` cancels the writes computed since the last call or command; a
+call or command that happened cannot be undone.
 
 The task's instructions spell out the rules the checker enforces. `main` may use
 `inputs` once; a helper that reads several inputs declares the argument as
@@ -131,20 +133,21 @@ filesystem with a quota if the agent should not be able to fill the disk.
    first if it has one, then Bend and BendTT check its laws. The source is also
    checked against the foundation interface alone. All must accept.
 3. **Execute.** The Bend evaluator runs that same `main` with the private
-   inputs until the program ends or reaches a call. The writes computed up to that
-   point, plus the call, are one step. A plugin's guard runner, if it has one, also
+   inputs until the program ends or reaches a call or command. The writes computed
+   up to that point, plus the call or command, are one step. A plugin's guard runner, if it has one, also
    runs and must return the identical step or veto it.
 4. **Apply effects.** A fixed codec decodes the step; the host never interprets
    application logic. The gateway validates the whole step and the expiry, then
    performs it in program order. It replaces each file atomically (temporary file,
-   flush, rename, flush the directory), then sends the call. To continue, it runs
-   `main` again from the start with the responses so far; the run must reproduce
-   every step already performed. A program without calls is a single step.
+   flush, rename, flush the directory), then sends the call or runs the command. To
+   continue, it runs `main` again from the start with the results so far; the run
+   must reproduce every step already performed. A program without calls or commands
+   is a single step.
 5. **Report.** The worker publishes `results/<id>.json`.
 
 The gateway also keeps an append-only audit log in the owner's directory: each
 check, each attempt, the planned writes, each call's request digest and response
-status, and the outcome. Owner credentials are never recorded.
+status, each command's argument digest and exit status, and the outcome. Owner credentials are never recorded.
 
 ## HTTP calls
 
@@ -172,6 +175,36 @@ refused.
 Formats are in [Configuration](../reference/configuration.md#http-endpoints) and
 limits in [Limits](../reference/limits.md).
 
+## Commands
+
+The owner enrolls up to 16 command templates in `session.commands`. A template fixes
+the program, by absolute path, and its arguments; the program the agent wrote fills
+only the template's slots, one `PGArg` per slot. A slot takes one of a fixed list of
+values, or text from a fixed character set up to a length. Text cannot be empty or
+start with `-`, so it cannot act as an option. The gateway checks every argument at
+dispatch.
+
+- The gateway executes the program directly, never through a shell, with empty
+  standard input, only the template's environment and its working directory. The
+  command runs as the worker's user, so a template can do whatever its program can
+  do with that user's access.
+- The program gets the exit status and up to 65,536 bytes of standard output and
+  error combined. A command that cannot start, is killed by a signal or prints more
+  reaches it as `PGRunFailed`.
+- A command that runs past its timeout is killed with its process group, and the
+  result is `uncertain`. When a command exits and leaves a process running in its
+  group, the gateway kills that process and the result is also `uncertain`, because
+  what the process did is unknown. A process that leaves the group, for example with
+  `setsid`, is not tracked; enroll programs that do not daemonize.
+- A command does not start if the run has less time left than its timeout.
+- Each command runs once. Calls and commands share the limit of 8 per run.
+
+Enrollment refuses a template that runs a write destination, and refuses free text
+or a written file as an argument to programs that run their arguments as code, such
+as shells and interpreters. That check catches common cases only. What each
+template can reach is the owner's decision. See
+[Configuration](../reference/configuration.md#commands).
+
 Steps 2 and 3 run the same text with the same pinned toolchain, so the program
 that runs is the program that was checked. Processed proposal files stay in the
 outbox and count toward its limit of 128 entries; above that the worker stops until
@@ -187,15 +220,15 @@ Each result file holds `schema`, `proposal`, `status`, `reason`, `source_id`,
 | `completed` | none | The program ended and every effect was performed. |
 | `rejected` | `invalid_program_source` | The file could not be read as a proposal: a link, FIFO, empty or non-UTF-8 file, or one that changed while being read. |
 | `rejected` | `mandatory_obligation_failed` | Verification failed. Syntax and type errors from the foundation check come with the checker's diagnostics; a plugin failure only says `Program rejected by gateway verification.` |
-| `rejected` | `execution_refused` | The program was accepted but stopped before any effect: `PGAbort`, a guard veto or changed step, an evaluator error or timeout, or a write or call the enrollment does not allow. |
+| `rejected` | `execution_refused` | The program was accepted but stopped before any effect: `PGAbort`, a guard veto or changed step, an evaluator error or timeout, or a write, call or command the enrollment does not allow. |
 | `rejected` | `session_unavailable` | The session expired before checking, or something the enrollment pinned changed, such as a plugin's verifier. |
-| `stopped` | `stopped_after_effects` | The program stopped between effects, after some had been performed: `PGAbort`, a guard veto, a denied write or call, an evaluator error or the deadline. Every performed effect is known and stands; the rest of the step was not performed. |
-| `uncertain` | `owner_reconciliation_required` | Something failed while an effect was being performed, or a sent call got no answer. That effect may have happened; the owner checks the files and endpoints. |
+| `stopped` | `stopped_after_effects` | The program stopped between effects, after some had been performed: `PGAbort`, a guard veto, a denied write, call or command, an evaluator error or the deadline. Every performed effect is known and stands; the rest of the step was not performed. |
+| `uncertain` | `owner_reconciliation_required` | Something failed while an effect was being performed, a sent call got no answer, or a command timed out or left a process running. That effect may have happened; the owner checks the files, endpoints and what the command changes. |
 
 Nothing is performed for any `rejected` result.
 
 The owner's audit log also records where a run ended. A step's effects are its
-writes in program order, then its call; positions are `[step, effect]`, from 1. A
+writes in program order, then its call or command; positions are `[step, effect]`, from 1. A
 `stopped` record has `stopped_at`, the first effect that was not performed. An
 `uncertain` record has `in_doubt`, the effects whose outcome is unknown. The agent's
 result carries neither, because where a program stops can depend on private inputs.
@@ -214,7 +247,7 @@ To review the foundation, read in this order:
 | `proofguard/admission.py` | Can anything run without acceptance of these exact bytes? |
 | `bend-spec/backend/program.mjs` | Do checking and evaluation use the same order? |
 | `bend-spec/backend/io.mjs`, `proofguard/effects.py` | Does the codec only decode concrete bytes? |
-| `proofguard/gateway.py`, `http.py` | Is every execution verified first? Can a call reach anything not enrolled? |
+| `proofguard/gateway.py`, `http.py`, `commands.py` | Is every execution verified first? Can a call or command reach anything not enrolled? |
 | `proofguard/worker.py` | Can a proposal change anything the owner fixed? |
 | `proofguard/sandbox.py` | What can the agent reach? |
 | `tests/core/` | Do the real sandbox and effect tests match these claims? |

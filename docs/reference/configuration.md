@@ -16,6 +16,10 @@
     "endpoints": [
       {"origin": "https://api.example.com", "path_prefix": "/v1/", "methods": ["GET", "POST"],
        "credential": {"header": "Authorization", "file": "/absolute/api-token"}}
+    ],
+    "commands": [
+      {"argv": ["/usr/bin/dig", "+short", {"slot": 0}, {"slot": 1}],
+       "slots": [{"chars": "a-z0-9.-", "max_bytes": 253}, {"one_of": ["A", "AAAA", "MX"]}], "timeout": 5}
     ]
   }
 }
@@ -39,6 +43,7 @@ A plugin with bindings and a guard that takes owner data is selected like this:
 | `session.expires` | Unix time in seconds. Checked before execution and before each write. |
 | `session.destinations` | Absolute file paths; programs write to them by index. Parent directories must exist. |
 | `session.endpoints` | Optional HTTP endpoints; programs call them by index. See [HTTP endpoints](#http-endpoints). |
+| `session.commands` | Optional command templates; programs run them by index. See [Commands](#commands). |
 
 Enrollment prints `{"schema": 1, "enrollment_id": "…", "contract_id": "…"}`.
 
@@ -55,6 +60,25 @@ Enrollment prints `{"schema": 1, "enrollment_id": "…", "contract_id": "…"}`.
 Endpoints must be distinct and are part of the enrollment, so changing one needs a
 new enrollment. The credential file's contents are not: the owner can replace them,
 for example to rotate a short-lived token, without enrolling again.
+
+## Commands
+
+| Field | Meaning |
+| --- | --- |
+| `argv` | The program's absolute path, then its arguments. Each item is a fixed string or `{"slot": n}`; every slot fills exactly one item. |
+| `slots` | Optional. Each is `{"one_of": [...]}`, a list of exact values, or `{"chars": "a-z0-9._-", "max_bytes": n}`: 1 to `n` bytes from that set, not starting with `-`. In `chars`, `x-y` is a range and a `-` at either end is literal; only printable ASCII is allowed. |
+| `timeout` | Optional, 1 to 60 seconds, default 10. |
+| `cwd` | Optional absolute working directory, default `/`. |
+| `env` | Optional map of environment variables; the command gets these and nothing else. |
+
+The command runs as the worker's user. `env` is stored in the enrollment record and
+a command can print it into output the program reads, so keep secrets out of it.
+
+Enrollment refuses a template whose program is a write destination. For programs
+that run their arguments as code (shells, interpreters, `env`, `xargs`, `git`,
+`find` and wrappers such as `nice` or `ionice`) it also refuses `chars` slots and
+any argument that names a write destination. The list cannot cover every program,
+so review what each template can reach.
 
 ## Plugin manifest
 

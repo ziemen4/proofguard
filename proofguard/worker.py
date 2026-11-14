@@ -102,7 +102,7 @@ class OutboxWorker:
                 raise ContractError("outbox and results must be absolute owner-selected paths")
         self.outbox, self.results = outbox.resolve(), results.resolve()
         code = Path(__file__).resolve().parents[1]
-        protected = (gateway.authority, code, *gateway.session.get_protected_paths(),
+        protected = (gateway.authority, code, *gateway.session.get_protected_paths(), *gateway.session.get_programs(),
                      gateway.admission.toolchain.source.resolve(),
                      gateway.admission.toolchain.kernel.resolve())
         if overlaps(self.outbox, self.results) or any(overlaps(self.outbox, path) for path in protected):
